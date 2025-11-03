@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+<head>
+  <title>Expenses - Dream Bee Network</title>
+  <style>
+    body {
+      background-image: url('https://images.unsplash.com/photo-1506744038136-46273834b3fb?ixlib=rb-4.0.3&auto=format&fit=crop&w=1950&q=80');
+      background-size: cover;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      color: #333;
+    }
+    nav {
+      margin-bottom: 20px;
+    }
+    nav a {
+      background-color: #fff;
+      padding: 6px 12px;
+      border-radius: 4px;
+      text-decoration: none;
+      color: #333;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    h1 {
+      color: white;
+      text-shadow: 2px 2px 4px #000;
+      margin-bottom: 10px;
+    }
+    a.add-btn {
+      display: inline-block;
+      margin-bottom: 15px;
+      padding: 8px 12px;
+      background-color: #fff;
+      color: #333;
+      text-decoration: none;
+      border-radius: 4px;
+    }
+    table {
+      background-color: rgba(255,255,255,0.85);
+      border-collapse: collapse;
+      width: 100%;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 8px;
+      text-align: left;
+    }
+    th a {
+      text-decoration: none;
+      color: #333;
+    }
+    th a:hover {
+      color: #007BFF;
+    }
+    form button {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: red;
+      font-size: 1.1em;
+    }
+  </style>
+</head>
+<body>
+  <h1>Dream Bee Network - Expenses</h1>
+  <nav>
+    <a href="/home">Home</a>
+    <a href="/">Assets</a>
+    <a href="/expenses" class="active">Expenses</a>
+  </nav>
+  <a href="/add_expense" class="add-btn">Add New Expense</a>
+  <table>
+    <tr>
+      <th><a href="{{ url_for('expenses', sort_by='description', order='asc' if sort_by != 'description' or order == 'desc' else 'desc') }}">Description{% if sort_by == 'description' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
+      <th><a href="{{ url_for('expenses', sort_by='category', order='asc' if sort_by != 'category' or order == 'desc' else 'desc') }}">Category{% if sort_by == 'category' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
+      <th><a href="{{ url_for('expenses', sort_by='amount', order='asc' if sort_by != 'amount' or order == 'desc' else 'desc') }}">Amount{% if sort_by == 'amount' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
+      <th><a href="{{ url_for('expenses', sort_by='currency', order='asc' if sort_by != 'currency' or order == 'desc' else 'desc') }}">Currency{% if sort_by == 'currency' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
+      <th><a href="{{ url_for('expenses', sort_by='expense_date', order='asc' if sort_by != 'expense_date' or order == 'desc' else 'desc') }}">Date{% if sort_by == 'expense_date' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
+      <th>Notes</th>
+      <th>Action</th>
+    </tr>
+    {% for expense in expenses %}
+    <tr>
+      <td>{{ expense.description }}</td>
+      <td>{{ expense.category }}</td>
+      <td>{{ expense.amount }}</td>
+      <td>{{ expense.currency }}</td>
+      <td>{{ expense.expense_date }}</td>
+      <td>{{ expense.notes }}</td>
+      <td>
+        <form method="POST" action="/delete_expense/{{ expense.id }}" onsubmit="return confirm('Delete this expense?');">
+          <button type="submit" title="Delete">&#10060;</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>

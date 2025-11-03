@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Approval Pending</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for a clean, modern look */
+        body { font-family: 'Inter', sans-serif; background-color: #f4f7f9; }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen p-4">
+    <div class="max-w-md w-full bg-white p-8 rounded-xl shadow-2xl text-center">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 text-yellow-500 mx-auto mb-4" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+        </svg>
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Account Awaiting Approval</h1>
+        <p class="text-gray-600 mb-6">
+            Thank you for registering! Your account has been successfully created, but it requires approval from an administrator before you can log in and access the system.
+        </p>
+        <p class="text-sm text-gray-500 mb-8">
+            Please check back soon or contact your administrator for more information.
+        </p>
+        <a href="{{ url_for('login') }}" class="inline-block px-6 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition duration-150 shadow-md">
+            Return to Login
+        </a>
+    </div>
+</body>
+</html>

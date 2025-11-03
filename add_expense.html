@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head>
+  <title>Add Expense - Dream Bee Network</title>
+  <style>
+    body {
+      background-image: url('https://images.unsplash.com/photo-1506744038136-46273834b3fb?ixlib=rb-4.0.3&auto=format&fit=crop&w=1950&q=80');
+      background-size: cover;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      color: #333;
+    }
+    h1 {
+      color: white;
+      text-shadow: 2px 2px 4px #000;
+      margin-bottom: 10px;
+    }
+    nav {
+      margin-bottom: 20px;
+    }
+    nav a {
+      background-color: #fff;
+      padding: 6px 12px;
+      border-radius: 4px;
+      text-decoration: none;
+      color: #333;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    form {
+      background-color: rgba(255,255,255,0.85);
+      padding: 15px;
+      border-radius: 8px;
+      max-width: 400px;
+    }
+    label {
+      display: block;
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 6px;
+      margin-top: 4px;
+      box-sizing: border-box;
+    }
+    button {
+      margin-top: 15px;
+      padding: 10px 15px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    a.back-link {
+      display: inline-block;
+      margin-top: 15px;
+      color: black;
+      text-decoration: none;
+      background: white;
+      padding: 8px 12px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Add New Expense</h1>
+  <nav>
+    <a href="/home">Home</a>
+    <a href="/">Assets</a>
+    <a href="/expenses">Expenses</a>
+  </nav>
+  <form method="POST">
+    <label>Description:
+      <input type="text" name="description" required>
+    </label>
+    <label>Category:
+      <select name="category" required>
+        <option value="" disabled selected>Select Category</option>
+        {% for cat in categories %}
+          <option value="{{ cat }}">{{ cat }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Amount:
+      <input type="number" step="0.01" name="amount" required>
+    </label>
+    <label>Currency:
+      <select name="currency" required>
+        <option value="" disabled selected>Select Currency</option>
+        {% for cur in currencies %}
+          <option value="{{ cur }}">{{ cur }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Date:
+      <input type="date" name="expense_date" required>
+    </label>
+    <label>Notes:
+      <textarea name="notes"></textarea>
+    </label>
+    <button type="submit">Add Expense</button>
+  </form>
+  <a href="/expenses" class="back-link">Back to Expenses</a>
+</body>
+</html>

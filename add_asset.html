@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add New Asset</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for better form aesthetics */
+        :root {
+            --primary-color: #3b82f6; /* Blue 500 */
+        }
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .form-input {
+            @apply w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-4xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
+        <header class="mb-8 border-b pb-4">
+            <h1 class="text-3xl font-extrabold text-gray-800">Add New Financial Asset</h1>
+            <p class="text-gray-500">Enter comprehensive details to ensure full visibility for your family.</p>
+        </header>
+
+        <form method="POST" action="{{ url_for('add_asset') }}" class="space-y-6">
+            
+            <!-- Basic Asset Details Section -->
+            <h2 class="text-xl font-semibold text-gray-700 border-b pb-2 mb-4">1. Core Asset Information</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <!-- Owner -->
+                <div>
+                    <label for="owner_id" class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                    <select id="owner_id" name="owner_id" required class="form-input">
+                        {% for owner in owners %}
+                        <option value="{{ owner.id }}">{{ owner.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Asset Type -->
+                <div>
+                    <label for="type" class="block text-sm font-medium text-gray-700 mb-1">Asset Type</label>
+                    <select id="type" name="type" required class="form-input">
+                        {% for type in asset_types %}
+                        <option value="{{ type }}">{{ type }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Asset Name -->
+                <div>
+                    <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Asset Name / Description (e.g., VTSAX, Primary Checking)</label>
+                    <input type="text" id="name" name="name" required class="form-input">
+                </div>
+
+                <!-- Account Number -->
+                <div>
+                    <label for="account_no" class="block text-sm font-medium text-gray-700 mb-1">Account/Policy Number (Last 4 Digits Recommended)</label>
+                    <input type="text" id="account_no" name="account_no" class="form-input">
+                </div>
+
+                <!-- Current Value -->
+                <div>
+                    <label for="value" class="block text-sm font-medium text-gray-700 mb-1">Current Value</label>
+                    <input type="number" step="0.01" id="value" name="value" required class="form-input">
+                </div>
+
+                <!-- Currency -->
+                <div>
+                    <label for="currency" class="block text-sm font-medium text-gray-700 mb-1">Currency</label>
+                    <select id="currency" name="currency" required class="form-input">
+                        {% for curr in currencies %}
+                        <option value="{{ curr }}">{{ curr }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Country -->
+                <div>
+                    <label for="country" class="block text-sm font-medium text-gray-700 mb-1">Country</label>
+                    <select id="country" name="country" required class="form-input">
+                        {% for country in countries %}
+                        <option value="{{ country }}">{{ country }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <!-- New Critical Access Details Section -->
+            <h2 class="text-xl font-semibold text-gray-700 border-b pb-2 pt-4 mb-4">2. Critical Access & Policy Details</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Financial Institution -->
+                <div>
+                    <label for="financial_institution" class="block text-sm font-medium text-gray-700 mb-1">Financial Institution</label>
+                    <input type="text" id="financial_institution" name="financial_institution" placeholder="e.g., Vanguard, Chase, MetLife" class="form-input">
+                </div>
+                
+                <!-- Policy/Plan Type -->
+                <div>
+                    <label for="policy_or_plan_type" class="block text-sm font-medium text-gray-700 mb-1">Policy/Plan Type</label>
+                    <input type="text" id="policy_or_plan_type" name="policy_or_plan_type" placeholder="e.g., ROTH IRA, Whole Life, Checking" class="form-input">
+                </div>
+
+                <!-- Beneficiary Name -->
+                <div>
+                    <label for="beneficiary_name" class="block text-sm font-medium text-gray-700 mb-1">Beneficiary Name (If Applicable)</label>
+                    <input type="text" id="beneficiary_name" name="beneficiary_name" placeholder="e.g., Spouse Name, Trust Name" class="form-input">
+                </div>
+
+                <!-- Contact Phone -->
+                <div>
+                    <label for="contact_phone" class="block text-sm font-medium text-gray-700 mb-1">Institution Contact Phone</label>
+                    <input type="tel" id="contact_phone" name="contact_phone" placeholder="e.g., +1-800-555-1234" class="form-input">
+                </div>
+
+                <!-- Document Location -->
+                <div class="md:col-span-2">
+                    <label for="document_location" class="block text-sm font-medium text-gray-700 mb-1">Official Document Location</label>
+                    <input type="text" id="document_location" name="document_location" placeholder="e.g., Safe Deposit Box #123, Cloud Folder/Estate/" class="form-input">
+                </div>
+            </div>
+
+            <!-- Strategy & Notes Section -->
+            <h2 class="text-xl font-semibold text-gray-700 border-b pb-2 pt-4 mb-4">3. Instructions and Notes</h2>
+            
+            <!-- Investment Strategy -->
+            <div>
+                <label for="investment_strategy" class="block text-sm font-medium text-gray-700 mb-1">Future Instructions / Investment Strategy</label>
+                <textarea id="investment_strategy" name="investment_strategy" rows="3" class="form-input" placeholder="e.g., 'Do not sell; this is a long-term holding intended for wealth building.' or 'Use these funds for children's tuition.'"></textarea>
+            </div>
+
+            <!-- General Notes -->
+            <div>
+                <label for="notes" class="block text-sm font-medium text-gray-700 mb-1">General Notes (e.g., Login hints)</label>
+                <textarea id="notes" name="notes" rows="3" class="form-input" placeholder="Any other relevant information..."></textarea>
+            </div>
+            
+            <div class="flex justify-between pt-4">
+                <a href="{{ url_for('index') }}" class="px-6 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors">Cancel</a>
+                <button type="submit" class="px-8 py-3 bg-blue-600 text-white font-bold rounded-lg shadow-lg hover:bg-blue-700 transition-colors transform hover:scale-105">
+                    Save Asset Details
+                </button>
+            </div>
+        </form>
+    </div>
+</body>
+</html>

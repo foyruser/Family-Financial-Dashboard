@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Family Financial Overview</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto">
+        
+        <!-- Header and Navigation (Updated to include Logout) -->
+        <header class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-gray-300">
+            <div class="mb-4 sm:mb-0">
+                <h1 class="text-3xl font-extrabold text-gray-800">Family Financial Dashboard</h1>
+                <p class="text-gray-500">Your consolidated financial status at a glance.</p>
+            </div>
+            <!-- Navigation and Logout Section -->
+            <nav class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4 items-start sm:items-center">
+                <a href="{{ url_for('index') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Assets</a>
+                <a href="{{ url_for('expenses') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Expenses</a>
+                
+                <!-- Logout Section -->
+                <div class="text-sm text-gray-600 flex items-center mt-2 sm:mt-0">
+                    Logged in as: <span class="font-bold text-gray-800">{{ session.get('username', 'Guest') }}</span>
+                    <a href="{{ url_for('logout') }}" class="ml-3 px-3 py-1 text-sm bg-red-100 text-red-700 font-semibold rounded-lg hover:bg-red-200 transition-colors shadow-sm">
+                        Logout
+                    </a>
+                </div>
+            </nav>
+        </header>
+
+        <!-- Main Metrics Grid: 3 cards side-by-side on large screens -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            
+            <!-- Card 1: Total Assets -->
+            <div class="bg-white p-6 rounded-xl shadow-2xl border-t-4 border-blue-600 transition-shadow hover:shadow-xl">
+                <p class="text-lg font-bold text-gray-800 mb-2">Total Assets</p>
+                <hr class="mb-4 border-blue-100">
+                <div class="space-y-4">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">USD Value</p>
+                        <p class="text-3xl font-extrabold text-blue-600">${{ "{:,.2f}".format(total_asset_usd) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">INR Value (Est.)</p>
+                        <p class="text-xl font-bold text-blue-800">₹{{ "{:,.2f}".format(total_asset_inr) }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card 2: Total Expenses -->
+            <div class="bg-white p-6 rounded-xl shadow-2xl border-t-4 border-red-600 transition-shadow hover:shadow-xl">
+                <p class="text-lg font-bold text-gray-800 mb-2">Total Expenses</p>
+                <hr class="mb-4 border-red-100">
+                <div class="space-y-4">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">USD Value</p>
+                        <p class="text-3xl font-extrabold text-red-600">${{ "{:,.2f}".format(total_expense_usd) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">INR Value (Est.)</p>
+                        <p class="text-xl font-bold text-red-800">₹{{ "{:,.2f}".format(total_expense_inr) }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card 3: Net Worth -->
+            <div class="bg-white p-6 rounded-xl shadow-2xl border-t-4 border-green-600 transition-shadow hover:shadow-xl">
+                <p class="text-lg font-bold text-gray-800 mb-2">Net Worth</p>
+                <hr class="mb-4 border-green-100">
+                <div class="space-y-4">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">USD Value</p>
+                        <p class="text-3xl font-extrabold text-green-600">${{ "{:,.2f}".format(net_usd) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-sm font-medium text-gray-500">INR Value (Est.)</p>
+                        <p class="text-xl font-bold text-green-800">₹{{ "{:,.2f}".format(net_inr) }}</p>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+        
+        <footer class="mt-10 pt-4 border-t text-center text-sm text-gray-400">
+            Dream Bee Network &copy; 2024. Data visibility for peace of mind.
+        </footer>
+    </div>
+</body>
+</html>

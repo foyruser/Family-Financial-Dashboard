@@ -5,15 +5,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import requests
 import functools # For the login_required decorator
-import locale # For numeric sorting
+import os # NEW: To read environment variables securely
+import sys # NEW: For logging critical errors
 
 
-# Set locale for proper number sorting (optional, but good practice)
-locale.setlocale(locale.LC_ALL, 'C')
-
-
+# --- APPLICATION INITIALIZATION ---
 app = Flask(__name__)
-
 
 # --- SECURITY CONFIGURATION ---
 # CRITICAL: CHANGE THIS TO A LONG, RANDOM STRING FOR PRODUCTION
@@ -21,36 +18,63 @@ app.secret_key = 'Hellohowareyoudoingiamdoingfineokaythankyou'
 bcrypt = Bcrypt(app)
 # ------------------------------
 
+# -----------------------------------------------------------
+# SECURE CONFIGURATION: Reading credentials from Environment Variables
+# -----------------------------------------------------------
 
-conn_params = {
-    'dbname': 'postgres',
-    'user': 'postgres',
-    'password': 'Kavin@074',
-    'host': 'localhost',
-    'port': '7450'
-}
+# 1. Database connection string (DSN)
+# This MUST be set on your hosting platform (e.g., DATABASE_URL on Render).
+DATABASE_URL = os.environ.get('DATABASE_URL') 
+
+# 2. Currency Exchange API Key
+# This MUST be set on your hosting platform (e.g., EXCHANGE_RATE_API_KEY).
+EXCHANGE_RATE_API_KEY = os.environ.get('EXCHANGE_RATE_API_KEY')
+
+# Removed the hardcoded conn_params and API_KEY global variables.
+
+# -----------------------------------------------------------
 
 
-# NOTE: This API key is used for the currency exchange rate service.
-API_KEY = '131d158eefb0d3cdb3a4557a'
+# --- CONNECTION HELPER FUNCTIONS ---
 
+class ConnectionError(Exception):
+    """Custom exception for database connection failures."""
+    pass
 
 def get_exchange_rates():
     """Fetches the latest exchange rates from USD base."""
-    url = f'https://v6.exchangerate-api.com/v6/{API_KEY}/latest/USD'
+    key = EXCHANGE_RATE_API_KEY # Use the securely read environment variable
+    
+    if not key:
+        print("WARNING: EXCHANGE_RATE_API_KEY is missing. Using fallback rates.", file=sys.stderr)
+        # Fallback rates if API key is missing
+        return {'USD': 1.0, 'INR': 83.0, 'EUR': 0.9, 'GBP': 0.8}
+        
+    url = f'https://v6.exchangerate-api.com/v6/{key}/latest/USD'
     response = requests.get(url)
     data = response.json()
     if data.get('result') == 'success':
         return data['conversion_rates']
     else:
+        print(f"ERROR: Exchange rate API call failed. Status: {data.get('result')}. Using fallback rates.", file=sys.stderr)
         # Fallback rates if API call fails
         return {'USD': 1.0, 'INR': 83.0, 'EUR': 0.9, 'GBP': 0.8}
 
 
 def get_db_connection():
-    """Establishes and returns a connection to the PostgreSQL database."""
-    return psycopg2.connect(**conn_params)
+    """Establishes and returns a connection to the PostgreSQL database using DSN."""
+    if not DATABASE_URL:
+        # Halts execution if critical config is missing (will propagate a 500 error to user)
+        raise ConnectionError("DATABASE_URL environment variable not found. Cannot connect to database.")
 
+    try:
+        # Connect using the DSN string provided by the hosting service (e.g., Neon)
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        print(f"Database connection failed using DSN: {e}", file=sys.stderr)
+        # Convert psycopg2 error to a custom error for cleaner stack traces
+        raise ConnectionError(f"Failed to connect to database: {e}")
 
 # --- AUTHENTICATION DECORATOR ---
 def login_required(view):
@@ -97,6 +121,8 @@ def register():
         except psycopg2.IntegrityError:
             # Handle case where username already exists
             return render_template('register.html', error='Username already taken. Please choose another.')
+        except ConnectionError as e:
+            return render_template('register.html', error=f'Connection Error: {e}')
         except Exception as e:
             # Log and handle other errors
             print(f"Registration error: {e}")
@@ -113,14 +139,17 @@ def login():
         username = request.form['username']
         password = request.form['password']
 
-
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT id, password_hash FROM users WHERE username = %s;', (username,))
-        user = cur.fetchone()
-        cur.close()
-        conn.close()
-
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute('SELECT id, password_hash FROM users WHERE username = %s;', (username,))
+            user = cur.fetchone()
+            cur.close()
+            conn.close()
+        except ConnectionError as e:
+            return render_template('login.html', error=f'Connection Error: {e}')
+        except Exception as e:
+            return render_template('login.html', error=f'An error occurred during lookup: {e}')
 
         if user and bcrypt.check_password_hash(user['password_hash'], password):
             # Login successful
@@ -146,31 +175,44 @@ def logout():
 # --- HELPER FUNCTION: Get Owners ---
 def get_owners():
     """Fetches all owner records (id and name) from the database."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute('SELECT id, name FROM owners ORDER BY name;')
-    owners = cur.fetchall()
-    cur.close()
-    conn.close()
-    return owners
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT id, name FROM owners ORDER BY name;')
+        owners = cur.fetchall()
+        cur.close()
+        return owners
+    except ConnectionError:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
 # ----------------------------------------
 
 # --- ADDITION for asset type pie chart ---
 def get_asset_type_distribution():
     """Fetches total asset value grouped by asset type (for pie chart)."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT type, SUM(value) as total_value
-        FROM assets
-        WHERE activate = TRUE
-        GROUP BY type
-        ORDER BY total_value DESC
-    """)
-    data = cur.fetchall()
-    cur.close()
-    conn.close()
-    return data
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT type, SUM(value) as total_value
+            FROM assets
+            WHERE activate = TRUE
+            GROUP BY type
+            ORDER BY total_value DESC
+        """)
+        data = cur.fetchall()
+        cur.close()
+        return data
+    except ConnectionError:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
 # ----------------------------------------
 
 
@@ -181,30 +223,38 @@ def get_asset_type_distribution():
 @login_required # PROTECTED
 def home():
     """Dashboard view showing aggregated assets, expenses, and net worth."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch assets
+        cur.execute('''
+            SELECT a.*, o.name AS owner_name
+            FROM assets a
+            JOIN owners o ON a.owner_id = o.id
+            WHERE a.activate = TRUE;
+        ''')
+        assets = cur.fetchall()
+        
+        # Fetch expenses
+        cur.execute('''
+            SELECT e.*, o.name AS owner_name
+            FROM expenses e
+            JOIN owners o ON e.owner_id = o.id
+            WHERE e.activate = TRUE;
+        ''')
+        expenses = cur.fetchall()
+        cur.close()
     
-    # Fetch assets
-    cur.execute('''
-        SELECT a.*, o.name AS owner_name
-        FROM assets a
-        JOIN owners o ON a.owner_id = o.id
-        WHERE a.activate = TRUE;
-    ''')
-    assets = cur.fetchall()
-    
-    # Fetch expenses
-    cur.execute('''
-        SELECT e.*, o.name AS owner_name
-        FROM expenses e
-        JOIN owners o ON e.owner_id = o.id
-        WHERE e.activate = TRUE;
-    ''')
-    expenses = cur.fetchall()
-
+    except ConnectionError as e:
+        print(f"Home route DB error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load dashboard data.", 500
+    finally:
+        if conn is not None:
+            conn.close()
 
     rates = get_exchange_rates()
-
 
     total_asset_usd = 0
     total_asset_inr = 0
@@ -255,10 +305,6 @@ def home():
     # -------------------------------------------------------------
 
 
-    cur.close()
-    conn.close()
-
-
     net_usd = round(total_asset_usd - total_expense_usd, 2)
     net_inr = round(total_asset_inr - total_expense_inr, 2)
 
@@ -295,32 +341,38 @@ def index():
     # Check if sorting on a database column
     if sort_by in db_sort_columns:
         sort_column = f'a.{sort_by}'
-        db_sort = True
+        order_db = 'asc' if order.lower() == 'asc' else 'desc'
     elif sort_by == 'owner_name':
         sort_column = 'o.name'
-        db_sort = True
+        order_db = 'asc' if order.lower() == 'asc' else 'desc'
     else:
         # Default to DB sorting by ID if calculated field is requested first
         sort_column = 'a.id'
-        db_sort = False # Will use Python sorting later if needed
+        order_db = 'desc' # Default order for calculated fields is handled in Python
     
-    order_db = 'asc' if order.lower() == 'asc' else 'desc'
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Always query for all active assets, sort by ID or requested DB column
+        query = f'''
+            SELECT a.*, o.name AS owner_name 
+            FROM assets a 
+            JOIN owners o ON a.owner_id = o.id 
+            WHERE a.activate = TRUE 
+            ORDER BY {sort_column} {order_db};
+        '''
+        cur.execute(query)
+        assets = cur.fetchall()
+        cur.close()
     
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    # Always query for all active assets, sort by ID or requested DB column
-    query = f'''
-        SELECT a.*, o.name AS owner_name 
-        FROM assets a 
-        JOIN owners o ON a.owner_id = o.id 
-        WHERE a.activate = TRUE 
-        ORDER BY {sort_column} {order_db};
-    '''
-    cur.execute(query)
-    assets = cur.fetchall()
-    cur.close()
-    conn.close()
+    except ConnectionError as e:
+        print(f"Index route DB error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load asset list.", 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
     rates = get_exchange_rates()
@@ -349,7 +401,7 @@ def index():
             else:
                 asset['value_usd'] = 0.00 # Use 0.00 for calculation purposes
                 asset['value_usd_display'] = "N/A" # Use a separate key for display
-        
+            
         # Calculate INR value
         if 'value_usd_display' not in asset:
              asset['value_usd_display'] = round(asset['value_usd'], 2)
@@ -357,8 +409,8 @@ def index():
              total_usd += asset['value_usd']
              total_inr += asset['value_inr']
         else:
-             asset['value_inr'] = 0.00
-             asset['value_inr_display'] = "N/A" # Separate key for INR display
+            asset['value_inr'] = 0.00
+            asset['value_inr_display'] = "N/A" # Separate key for INR display
 
 
     # 2. Python Sorting for Calculated Fields (value_usd)
@@ -375,32 +427,40 @@ def index():
     return render_template('index.html', assets=assets, total_usd=total_usd, total_inr=total_inr, sort_by=sort_by, order=order_db)
 
 
-# --- ADD ASSET ROUTE (CRITICAL FIX APPLIED) ---
+# --- ADD ASSET ROUTE ---
 @app.route('/add_asset', methods=['GET', 'POST'])
 @login_required # PROTECTED
 def add_asset():
     """Displays form and handles submission for adding a new asset."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
 
-    cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
-    asset_types = [row['type_name'] for row in cur.fetchall()]
+        cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
+        asset_types = [row['type_name'] for row in cur.fetchall()]
 
 
-    cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
-    countries = [row['country_name'] for row in cur.fetchall()]
+        cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
+        countries = [row['country_name'] for row in cur.fetchall()]
 
 
-    cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
-    currencies = [row['currency_code'] for row in cur.fetchall()]
+        cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
+        currencies = [row['currency_code'] for row in cur.fetchall()]
 
-
-    owners = get_owners() 
-
-
-    cur.close()
-    conn.close()
+        # Re-fetch owners inside the try block for error propagation
+        owners = get_owners() 
+        
+        cur.close()
+        # conn.close() # Keep connection open if POST is coming next
+    
+    except ConnectionError as e:
+        print(f"Add asset config error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load form options.", 500
+    finally:
+        if conn is not None and request.method == 'GET':
+            conn.close()
 
 
     if request.method == 'POST':
@@ -431,10 +491,10 @@ def add_asset():
         investment_strategy = request.form['investment_strategy']
 
 
-
-        conn = get_db_connection()
-        cur = conn.cursor()
+        conn = None
         try:
+            conn = get_db_connection()
+            cur = conn.cursor()
             cur.execute("""
                 INSERT INTO assets (
                     owner_id, type, name, country, currency, value, account_no, last_updated, notes, activate,
@@ -449,13 +509,16 @@ def add_asset():
                 financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy
             ))
             conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
         except Exception as e:
-            conn.rollback()
-            print(f"Database insertion error in add_asset: {e}")
-            # You might want to flash an error message here, but for now, just print and redirect
+            if conn: conn.rollback()
+            print(f"Database insertion error in add_asset: {e}", file=sys.stderr)
+            return f"An error occurred during asset insertion: {e}", 500
         finally:
-            cur.close()
-            conn.close()
+            if conn is not None:
+                cur.close()
+                conn.close()
         return redirect('/')
 
 
@@ -467,23 +530,43 @@ def add_asset():
 @login_required # PROTECTED
 def edit_asset(asset_id):
     """Displays form and handles submission for editing an existing asset."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
 
-    cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
-    asset_types = [row['type_name'] for row in cur.fetchall()]
+        cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
+        asset_types = [row['type_name'] for row in cur.fetchall()]
 
 
-    cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
-    countries = [row['country_name'] for row in cur.fetchall()]
+        cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
+        countries = [row['country_name'] for row in cur.fetchall()]
 
 
-    cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
-    currencies = [row['currency_code'] for row in cur.fetchall()]
+        cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
+        currencies = [row['currency_code'] for row in cur.fetchall()]
 
 
-    owners = get_owners() 
+        owners = get_owners() 
+        
+        # Fetch the asset to edit, regardless of request method
+        cur.execute('SELECT * FROM assets WHERE id=%s;', (asset_id,))
+        asset = cur.fetchone()
+
+        if asset is None:
+            return "Asset not found", 404
+
+    except ConnectionError as e:
+        print(f"Edit asset config error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load form options or asset.", 500
+    except Exception as e:
+        print(f"Edit asset initial fetch error: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None and request.method == 'GET':
+            cur.close()
+            conn.close()
 
 
     if request.method == 'POST':
@@ -513,8 +596,10 @@ def edit_asset(asset_id):
         document_location = request.form['document_location']
         investment_strategy = request.form['investment_strategy']
 
-
+        conn = None
         try:
+            conn = get_db_connection()
+            cur = conn.cursor()
             cur.execute("""
                 UPDATE assets
                 SET 
@@ -527,27 +612,20 @@ def edit_asset(asset_id):
                 asset_id
             ))
             conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
         except Exception as e:
-            conn.rollback()
-            print(f"Database update error in edit_asset: {e}")
+            if conn: conn.rollback()
+            print(f"Database update error in edit_asset: {e}", file=sys.stderr)
+            return f"An error occurred during asset update: {e}", 500
         finally:
-            cur.close()
-            conn.close()
+            if conn is not None:
+                cur.close()
+                conn.close()
             
         return redirect('/')
 
-
-    # GET request - fetch existing asset data
-    cur.execute('SELECT * FROM assets WHERE id=%s;', (asset_id,))
-    asset = cur.fetchone()
-    cur.close()
-    conn.close()
-
-
-    if asset is None:
-        return "Asset not found", 404
-
-
+    # GET request render
     return render_template('edit_asset.html', asset=asset, asset_types=asset_types, countries=countries, currencies=currencies, owners=owners)
 
 
@@ -555,12 +633,22 @@ def edit_asset(asset_id):
 @login_required # PROTECTED
 def delete_asset(asset_id):
     """Marks an asset as inactive (soft delete)."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('UPDATE assets SET activate = FALSE WHERE id = %s;', (asset_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE assets SET activate = FALSE WHERE id = %s;', (asset_id,))
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"Database error on delete: {e}", file=sys.stderr)
+        return f"An error occurred during deletion: {e}", 500
+    finally:
+        if conn is not None:
+            cur.close()
+            conn.close()
     return redirect('/')
 
 
@@ -582,19 +670,28 @@ def expenses():
     sort_column = 'o.name' if sort_by == 'owner_name' else f'e.{sort_by}'
 
 
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    query = f'''
-        SELECT e.*, o.name AS owner_name
-        FROM expenses e
-        JOIN owners o ON e.owner_id = o.id
-        WHERE e.activate = TRUE 
-        ORDER BY {sort_column} {order};
-    '''
-    cur.execute(query)
-    expenses = cur.fetchall()
-    cur.close()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        query = f'''
+            SELECT e.*, o.name AS owner_name
+            FROM expenses e
+            JOIN owners o ON e.owner_id = o.id
+            WHERE e.activate = TRUE 
+            ORDER BY {sort_column} {order};
+        '''
+        cur.execute(query)
+        expenses = cur.fetchall()
+        cur.close()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Expense list fetch error: {e}", file=sys.stderr)
+        return f"An error occurred fetching expenses: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 
     return render_template('expenses.html', expenses=expenses, sort_by=sort_by, order=order)
@@ -627,15 +724,25 @@ def add_expense():
         notes = request.form['notes']
 
 
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO expenses (owner_id, description, category, amount, currency, expense_date, notes, activate)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
-        """, (owner_id, description, category, amount, currency, expense_date, notes))
-        conn.commit()
-        cur.close()
-        conn.close()
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO expenses (owner_id, description, category, amount, currency, expense_date, notes, activate)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+            """, (owner_id, description, category, amount, currency, expense_date, notes))
+            conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Expense insertion error: {e}", file=sys.stderr)
+            return f"An error occurred inserting expense: {e}", 500
+        finally:
+            if conn is not None:
+                cur.close()
+                conn.close()
         return redirect('/expenses')
 
 
@@ -649,12 +756,29 @@ def edit_expense(expense_id):
     categories = ['Travel', 'Office Supplies', 'Utilities', 'Salary', 'Miscellaneous']
     currencies = ['USD', 'INR', 'EUR', 'GBP', 'JPY']
     
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-
-
+    conn = None
     owners = get_owners() 
 
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch expense for GET/initial check
+        cur.execute('SELECT * FROM expenses WHERE id=%s;', (expense_id,))
+        expense = cur.fetchone()
+        
+        if expense is None:
+            return "Expense not found", 404
+
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Expense fetch error: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None and request.method == 'GET':
+            cur.close()
+            conn.close()
 
     if request.method == 'POST':
         owner_id = request.form['owner_id']
@@ -672,29 +796,31 @@ def edit_expense(expense_id):
         expense_date = request.form['expense_date']
         notes = request.form['notes']
 
-
-        cur.execute("""
-            UPDATE expenses
-            SET owner_id=%s, description=%s, category=%s, amount=%s, currency=%s, expense_date=%s, notes=%s
-            WHERE id=%s
-        """, (owner_id, description, category, amount, currency, expense_date, notes, expense_id))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE expenses
+                SET owner_id=%s, description=%s, category=%s, amount=%s, currency=%s, expense_date=%s, notes=%s
+                WHERE id=%s
+            """, (owner_id, description, category, amount, currency, expense_date, notes, expense_id))
+            
+            conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Expense update error: {e}", file=sys.stderr)
+            return f"An error occurred updating expense: {e}", 500
+        finally:
+            if conn is not None:
+                cur.close()
+                conn.close()
         return redirect('/expenses')
 
 
-    cur.execute('SELECT * FROM expenses WHERE id=%s;', (expense_id,))
-    expense = cur.fetchone()
-    cur.close()
-    conn.close()
-
-
-    if expense is None:
-        return "Expense not found", 404
-
-
+    # GET request render
     return render_template(
         'edit_expense.html', 
         expense=expense, 
@@ -708,12 +834,22 @@ def edit_expense(expense_id):
 @login_required # PROTECTED
 def delete_expense(expense_id):
     """Marks an expense as inactive (soft delete)."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('UPDATE expenses SET activate = FALSE WHERE id = %s;', (expense_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('UPDATE expenses SET activate = FALSE WHERE id = %s;', (expense_id,))
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"Expense deletion error: {e}", file=sys.stderr)
+        return f"An error occurred deleting expense: {e}", 500
+    finally:
+        if conn is not None:
+            cur.close()
+            conn.close()
     return redirect('/expenses')
 
 

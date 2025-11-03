@@ -5,8 +5,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import requests
 import functools # For the login_required decorator
-import os # NEW: To read environment variables securely
-import sys # NEW: For logging critical errors
+import os # To read environment variables securely
+import sys # For logging critical errors
 
 
 # --- APPLICATION INITIALIZATION ---
@@ -23,14 +23,10 @@ bcrypt = Bcrypt(app)
 # -----------------------------------------------------------
 
 # 1. Database connection string (DSN)
-# This MUST be set on your hosting platform (e.g., DATABASE_URL on Render).
 DATABASE_URL = os.environ.get('DATABASE_URL') 
 
 # 2. Currency Exchange API Key
-# This MUST be set on your hosting platform (e.g., EXCHANGE_RATE_API_KEY).
 EXCHANGE_RATE_API_KEY = os.environ.get('EXCHANGE_RATE_API_KEY')
-
-# Removed the hardcoded conn_params and API_KEY global variables.
 
 # -----------------------------------------------------------
 
@@ -76,7 +72,8 @@ def get_db_connection():
         # Convert psycopg2 error to a custom error for cleaner stack traces
         raise ConnectionError(f"Failed to connect to database: {e}")
 
-# --- AUTHENTICATION DECORATOR ---
+# --- AUTHENTICATION DECORATORS ---
+
 def login_required(view):
     """Decorator that ensures a user is logged in before allowing access."""
     @functools.wraps(view)
@@ -84,6 +81,24 @@ def login_required(view):
         if 'user_id' not in session:
             # Redirect to the login page if not logged in
             return redirect(url_for('login'))
+        return view(**kwargs)
+    return wrapped_view
+
+def admin_required(view):
+    """
+    Decorator that ensures the logged-in user is the hardcoded admin (user_id=1).
+    Note: This must be placed AFTER @login_required.
+    """
+    @functools.wraps(view)
+    def wrapped_view(**kwargs):
+        user_id = session.get('user_id')
+        
+        # We assume @login_required ran first, so user_id is in session.
+        # Check if the user is the hardcoded admin (ID 1)
+        if user_id != 1:
+            # Render the custom error template for access denial
+            return render_template('error.html', message="Access Denied: You must be an administrator to view this page."), 403
+            
         return view(**kwargs)
     return wrapped_view
 
@@ -101,22 +116,20 @@ def register():
         # Hash the password securely
         password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
 
-
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute('INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id;', (username, password_hash))
+            # NEW: Insert new users with is_approved = FALSE
+            cur.execute('INSERT INTO users (username, password_hash, is_approved) VALUES (%s, %s, FALSE) RETURNING id;', (username, password_hash))
             user_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
             conn.close()
 
-
-            # Automatically log in the user after successful registration
+            # Automatically log in the user and redirect to the pending page
             session['user_id'] = user_id
             session['username'] = username
-            return redirect(url_for('home'))
-
+            return redirect(url_for('pending_approval')) # NEW REDIRECT
 
         except psycopg2.IntegrityError:
             # Handle case where username already exists
@@ -127,7 +140,6 @@ def register():
             # Log and handle other errors
             print(f"Registration error: {e}")
             return render_template('register.html', error=f'An error occurred: {e}')
-
 
     return render_template('register.html', error=None)
 
@@ -142,7 +154,8 @@ def login():
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute('SELECT id, password_hash FROM users WHERE username = %s;', (username,))
+            # NEW: Select the is_approved column
+            cur.execute('SELECT id, password_hash, is_approved FROM users WHERE username = %s;', (username,))
             user = cur.fetchone()
             cur.close()
             conn.close()
@@ -152,14 +165,20 @@ def login():
             return render_template('login.html', error=f'An error occurred during lookup: {e}')
 
         if user and bcrypt.check_password_hash(user['password_hash'], password):
-            # Login successful
+            
+            # Login successful (credentials verified), now check approval status
             session['user_id'] = user['id']
             session['username'] = username
+
+            if not user.get('is_approved'):
+                # Redirect unapproved users to the pending page
+                return redirect(url_for('pending_approval'))
+            
+            # Standard successful login for an approved user
             return redirect(url_for('home'))
         else:
             # Login failed
             return render_template('login.html', error='Invalid username or password.')
-
 
     return render_template('login.html', error=None)
 
@@ -171,9 +190,51 @@ def logout():
     session.pop('username', None)
     return redirect(url_for('login'))
 
+# --- NEW PENDING APPROVAL ROUTE ---
+@app.route('/pending')
+@login_required # Ensure they are logged in before showing the pending page
+def pending_approval():
+    """Displays the page notifying the user their account is pending approval."""
+    return render_template('pending_approval.html')
+
+# --- NEW ADMIN APPROVAL ROUTE ---
+@app.route('/admin/approve', methods=['GET', 'POST'])
+@login_required # Must be logged in
+@admin_required # Must be user ID 1
+def admin_approve_users():
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        if request.method == 'POST':
+            user_id_to_approve = request.form.get('user_id')
+            if user_id_to_approve:
+                # Update the database to approve the user
+                cur.execute('UPDATE users SET is_approved = TRUE WHERE id = %s;', (user_id_to_approve,))
+                conn.commit()
+                # Use a standard redirect/refresh to update the list
+
+        # Fetch all unapproved users
+        cur.execute('SELECT id, username FROM users WHERE is_approved = FALSE ORDER BY id;')
+        pending_users = cur.fetchall()
+        
+        cur.close()
+        return render_template('admin_approve_users.html', pending_users=pending_users)
+
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Admin approval error: {e}", file=sys.stderr)
+        if conn: conn.rollback()
+        return f"An error occurred during approval process: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
 
 # --- HELPER FUNCTION: Get Owners ---
 def get_owners():
+# ... (rest of the get_owners function is unchanged) ...
     """Fetches all owner records (id and name) from the database."""
     conn = None
     try:
@@ -193,6 +254,7 @@ def get_owners():
 
 # --- ADDITION for asset type pie chart ---
 def get_asset_type_distribution():
+# ... (rest of the get_asset_type_distribution function is unchanged) ...
     """Fetches total asset value grouped by asset type (for pie chart)."""
     conn = None
     try:
@@ -223,6 +285,27 @@ def get_asset_type_distribution():
 @login_required # PROTECTED
 def home():
     """Dashboard view showing aggregated assets, expenses, and net worth."""
+    
+    # NEW CHECK: Ensure the user is approved before running the full dashboard logic
+    user_id = session.get('user_id')
+    if user_id:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur.fetchone()
+            # is_approved_tuple will be (True,) or (False,)
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            # If DB check fails, log and let the user access (better than hard crash)
+            print(f"Home route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn is not None:
+                conn.close()
+                
+    # Proceed with dashboard data fetching only if approved
     conn = None
     try:
         conn = get_db_connection()
@@ -322,12 +405,30 @@ def home():
     # -------------------------------------------------------------
 
 
-
 # --- INDEX/ASSETS LISTING ROUTE ---
 @app.route('/')
 @login_required # PROTECTED
 def index():
     """Lists all active assets with sorting and currency conversion."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Index route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn is not None:
+                conn.close()
+    
+    # Proceed with original logic...
     sort_by = request.args.get('sort_by', 'value_usd')
     order = request.args.get('order', 'desc')
 
@@ -336,7 +437,6 @@ def index():
     db_sort_columns = ['id', 'type', 'name', 'country', 'currency', 'value', 'last_updated']
     # Columns for Python/in-memory sorting (calculated values)
     python_sort_columns = ['owner_name', 'value_usd'] 
-
 
     # Check if sorting on a database column
     if sort_by in db_sort_columns:
@@ -432,6 +532,24 @@ def index():
 @login_required # PROTECTED
 def add_asset():
     """Displays form and handles submission for adding a new asset."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Add asset route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn is not None and request.method == 'GET':
+                conn.close()
+
     conn = None
     try:
         conn = get_db_connection()
@@ -530,6 +648,25 @@ def add_asset():
 @login_required # PROTECTED
 def edit_asset(asset_id):
     """Displays form and handles submission for editing an existing asset."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Edit asset route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+                
+    # Proceed with original logic...
     conn = None
     try:
         conn = get_db_connection()
@@ -633,6 +770,25 @@ def edit_asset(asset_id):
 @login_required # PROTECTED
 def delete_asset(asset_id):
     """Marks an asset as inactive (soft delete)."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Delete asset route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+    
+    # Proceed with original logic...
     conn = None
     try:
         conn = get_db_connection()
@@ -657,6 +813,25 @@ def delete_asset(asset_id):
 @login_required # PROTECTED
 def expenses():
     """Lists all active expenses with sorting."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Expenses route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+    
+    # Proceed with original logic...
     sort_by = request.args.get('sort_by', 'expense_date')
     order = request.args.get('order', 'desc')
 
@@ -701,6 +876,25 @@ def expenses():
 @login_required # PROTECTED
 def add_expense():
     """Displays form and handles submission for adding a new expense."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Add expense route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+    
+    # Proceed with original logic...
     categories = ['Travel', 'Office Supplies', 'Utilities', 'Salary', 'Miscellaneous']
     currencies = ['USD', 'INR', 'EUR', 'GBP', 'JPY']
     
@@ -753,6 +947,25 @@ def add_expense():
 @login_required # PROTECTED
 def edit_expense(expense_id):
     """Displays form and handles submission for editing an existing expense."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Edit expense route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+                
+    # Proceed with original logic...
     categories = ['Travel', 'Office Supplies', 'Utilities', 'Salary', 'Miscellaneous']
     currencies = ['USD', 'INR', 'EUR', 'GBP', 'JPY']
     
@@ -834,6 +1047,25 @@ def edit_expense(expense_id):
 @login_required # PROTECTED
 def delete_expense(expense_id):
     """Marks an expense as inactive (soft delete)."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Delete expense route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+                
+    # Proceed with original logic...
     conn = None
     try:
         conn = get_db_connection()

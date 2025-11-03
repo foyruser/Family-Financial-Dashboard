@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, g, flash
+from flask import Flask, render_template, request, redirect, url_for, session, g
 from flask_bcrypt import Bcrypt
 from collections import Counter
 import psycopg2
@@ -7,22 +7,16 @@ import requests
 import functools # For the login_required decorator
 import os # To read environment variables securely
 import sys # For logging critical errors
-from datetime import datetime
-import uuid # For generating unique group IDs
+
 
 # --- APPLICATION INITIALIZATION ---
 app = Flask(__name__)
 
 # --- SECURITY CONFIGURATION ---
 # CRITICAL: CHANGE THIS TO A LONG, RANDOM STRING FOR PRODUCTION
-app.secret_key = os.environ.get('SECRET_KEY', 'default-fallback-key-for-testing-only')
+app.secret_key = 'Hellohowareyoudoingiamdoingfineokaythankyou' 
 bcrypt = Bcrypt(app)
 # ------------------------------
-
-# --- GLOBAL CONSTANTS ---
-# This ID is only for temporary/unassigned users. Real groups get a unique ID.
-DEFAULT_GROUP_ID = 'unassigned-default-group' 
-BASE_CURRENCY = 'USD' # Currency for all exchange rate lookups
 
 # -----------------------------------------------------------
 # SECURE CONFIGURATION: Reading credentials from Environment Variables
@@ -36,106 +30,80 @@ EXCHANGE_RATE_API_KEY = os.environ.get('EXCHANGE_RATE_API_KEY')
 
 # -----------------------------------------------------------
 
+
 # --- CONNECTION HELPER FUNCTIONS ---
 
 class ConnectionError(Exception):
     """Custom exception for database connection failures."""
     pass
 
+def get_exchange_rates():
+    """Fetches the latest exchange rates from USD base."""
+    key = EXCHANGE_RATE_API_KEY # Use the securely read environment variable
+    
+    if not key:
+        print("WARNING: EXCHANGE_RATE_API_KEY not set. Currency conversion disabled.", file=sys.stderr)
+        return None
+    
+    # Using the ExchangeRate-API free tier (USD base)
+    url = f"https://v6.exchangerate-api.com/v6/{key}/latest/USD"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        data = response.json()
+        
+        if data['result'] == 'success':
+            return data['conversion_rates']
+        else:
+            print(f"API Error: {data.get('error-type', 'Unknown error')}", file=sys.stderr)
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching exchange rates: {e}", file=sys.stderr)
+        return None
+    
 def get_db_connection():
     """Establishes a connection to the PostgreSQL database."""
     if not DATABASE_URL:
-        print("CRITICAL ERROR: DATABASE_URL environment variable is not set.", file=sys.stderr)
-        raise ConnectionError("Database URL is not configured.")
-        
+        raise ConnectionError("DATABASE_URL environment variable is not set.")
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         return conn
     except Exception as e:
+        # Log the connection error details
         print(f"Database connection failed: {e}", file=sys.stderr)
-        raise ConnectionError("Failed to connect to the database.")
+        raise ConnectionError("Could not connect to the database.") from e
 
-def get_exchange_rates():
-    """Fetches the latest exchange rates from USD base."""
-    key = EXCHANGE_RATE_API_KEY
-    
-    if not key:
-        print("WARNING: EXCHANGE_RATE_API_KEY environment variable is not set.", file=sys.stderr)
-        return {BASE_CURRENCY: 1.0}
-    
-    url = f'https://v6.exchangerate-api.com/v6/{key}/latest/{BASE_CURRENCY}'
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('result') == 'success':
-            return data['conversion_rates']
-        else:
-            print(f"Exchange Rate API Error: {data.get('error-type')}", file=sys.stderr)
-            return {BASE_CURRENCY: 1.0}
-
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching exchange rates: {e}", file=sys.stderr)
-        return {BASE_CURRENCY: 1.0}
-        
-def generate_unique_group_id():
-    """Generates a simple, unique group identifier."""
-    # Use a small part of a UUID to keep it short and unique
-    short_uuid = uuid.uuid4().hex[:6] 
-    return f"family-{short_uuid}"
-
-# --- AUTHENTICATION & MULTI-TENANCY DECORATOR ---
+# --- AUTH DECORATOR ---
 
 def login_required(view):
-    """
-    Decorator that ensures a user is logged in, approved, and loads
-    their user data (including group_id) into Flask's `g` object.
-    """
+    """Decorator that ensures a user is logged in before allowing access to a view."""
     @functools.wraps(view)
     def wrapped_view(**kwargs):
-        user_id = session.get('user_id')
-        
-        if user_id is None:
+        # 1. Check if user_id is in session
+        if session.get('user_id') is None:
             return redirect(url_for('login'))
         
-        conn = None
+        # 2. Check for approval (after successful login)
+        user_id = session['user_id']
+        is_approved = False
+        conn_check = None
         try:
-            conn = get_db_connection()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            
-            # Fetch is_approved and group_id from public.users
-            cur.execute("""
-                SELECT id, username, is_approved, group_id 
-                FROM public.users 
-                WHERE id = %s;
-            """, (user_id,))
-            user = cur.fetchone()
-            
-            if user is None:
-                session.clear()
-                return redirect(url_for('login'))
-
-            g.user_id = user['id']
-            g.username = user['username']
-            g.is_approved = user['is_approved']
-            # CRITICAL: Store group_id for multi-tenancy filtering
-            g.group_id = user['group_id']
-            
-            if not g.is_approved:
-                return redirect(url_for('pending_approval'))
-                
-        except ConnectionError:
-             flash("Database connection failed during user load.", 'error')
-             return redirect(url_for('login'))
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if is_approved_tuple and is_approved_tuple['is_approved']:
+                is_approved = True
         except Exception as e:
-            print(f"Database error during user load: {e}", file=sys.stderr)
-            session.clear() 
-            flash("An internal error occurred.", 'error')
-            return redirect(url_for('login'))
+            print(f"Approval check failed: {e}", file=sys.stderr)
         finally:
-            if conn:
-                conn.close()
+            if conn_check is not None:
+                conn_check.close()
+                
+        if not is_approved:
+            return redirect(url_for('pending_approval'))
 
         return view(**kwargs)
     return wrapped_view
@@ -145,479 +113,1019 @@ def login_required(view):
 @app.route('/')
 @login_required
 def index():
-    """
-    Shows a dashboard or list of all active assets for the user's group.
-    """
-    conn = None
-    assets = []
-    
-    # Check if the user is still in the temporary group
-    if g.group_id == DEFAULT_GROUP_ID:
-        flash("Welcome! Please create or join a family group to start tracking assets.", 'warning')
-        return redirect(url_for('group_management'))
-
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # CRITICAL MULTI-TENANCY CHANGE: Filter public.assets by group_id
-        cur.execute("""
-            SELECT id, name, type, current_value, currency, description, 
-                   added_date, last_updated
-            FROM public.assets
-            WHERE activate = TRUE AND group_id = %s
-            ORDER BY last_updated DESC;
-        """, (g.group_id,))
-        
-        assets = cur.fetchall()
-        
-    except ConnectionError:
-        flash("Database connection failed.", 'error')
-        return redirect(url_for('logout'))
-    except Exception as e:
-        print(f"Error fetching assets: {e}", file=sys.stderr)
-        flash("An internal error occurred while fetching assets.", 'error')
-        return redirect(url_for('logout'))
-    finally:
-        if conn:
-            conn.close()
-            
-    rates = get_exchange_rates()
-
-    return render_template('index.html', assets=assets, rates=rates)
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Handles user login and session creation."""
-    if session.get('user_id'):
-        return redirect(url_for('index'))
-        
-    error = None
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        conn = None
-        
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            
-            cur.execute("SELECT id, password_hash, is_approved, group_id FROM public.users WHERE username = %s;", (username,))
-            user = cur.fetchone()
-            
-            if user is None or not bcrypt.check_password_hash(user['password_hash'], password):
-                error = 'Incorrect username or password.'
-            else:
-                session['user_id'] = user['id']
-                session['group_id'] = user['group_id'] 
-                
-                if not user['is_approved']:
-                    return redirect(url_for('pending_approval'))
-                    
-                return redirect(url_for('index'))
-                
-        except ConnectionError:
-            error = "Database connection failed."
-        except Exception as e:
-            print(f"Login error: {e}", file=sys.stderr)
-            error = "An unexpected error occurred during login."
-        finally:
-            if conn:
-                conn.close()
-
-    return render_template('login.html', error=error)
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    """
-    Handles new user registration. Users can optionally join a group immediately.
-    """
-    if session.get('user_id'):
-        return redirect(url_for('index'))
-        
-    error = None
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        # User can optionally provide a group ID to join upon registration
-        desired_group_id = request.form.get('group_id', '').strip()
-        
-        if not username or not password:
-            error = 'Username and password are required.'
-        else:
-            password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-            conn = None
-            
-            try:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                
-                # Check if username already exists in public.users
-                cur.execute("SELECT id FROM public.users WHERE username = %s;", (username,))
-                if cur.fetchone() is not None:
-                    error = f"User {username} is already registered."
-                else:
-                    final_group_id = DEFAULT_GROUP_ID
-                    
-                    if desired_group_id:
-                        # If a group ID is provided, check if it exists (i.e., if anyone is in it)
-                        cur.execute("SELECT group_id FROM public.users WHERE group_id = %s LIMIT 1;", (desired_group_id,))
-                        if cur.fetchone():
-                            final_group_id = desired_group_id
-                        else:
-                            error = f"The Group ID '{desired_group_id}' does not exist. Please register without a Group ID and join later, or check your code."
-                            conn.close() # Close connection to abort registration
-                            return render_template('register.html', error=error, group_id=desired_group_id)
-
-                    # Assign the calculated group ID to the new user in public.users
-                    cur.execute("""
-                        INSERT INTO public.users (username, password_hash, is_approved, group_id)
-                        VALUES (%s, %s, FALSE, %s);
-                    """, (username, password_hash, final_group_id))
-                    
-                    conn.commit()
-                    flash('Registration successful! Please wait for admin approval.', 'success')
-                    return redirect(url_for('login'))
-                    
-            except ConnectionError:
-                error = "Database connection failed during registration."
-            except Exception as e:
-                if conn: conn.rollback()
-                print(f"Registration error: {e}", file=sys.stderr)
-                error = "An unexpected error occurred during registration."
-            finally:
-                if conn:
-                    conn.close()
-
-    return render_template('register.html', error=error)
-
-@app.route('/logout')
-def logout():
-    """Clears the session and logs the user out."""
-    session.clear()
-    return redirect(url_for('login'))
-
-@app.route('/pending_approval')
-def pending_approval():
-    """Informs the user that their account is awaiting approval."""
     user_id = session.get('user_id')
-    if not user_id:
+    # CRITICAL FIX: Ensure group_id is an integer from session
+    group_id = session.get('group_id')
+    
+    if group_id is None:
+        # This should ideally not happen if login_required passed, but good safeguard
         return redirect(url_for('login'))
         
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Check public.users
-        cur.execute("SELECT is_approved FROM public.users WHERE id = %s;", (user_id,))
-        is_approved_tuple = cur.fetchone()
+
+        # 1. Fetch Assets
+        try:
+            cur.execute('''
+                SELECT id, name, type, description, current_value, currency, notes, last_updated 
+                FROM assets 
+                WHERE group_id = %s AND active = TRUE
+                ORDER BY name;
+            ''', (group_id,))
+            assets = cur.fetchall()
+        except psycopg2.ProgrammingError as e:
+            if 'column "description" does not exist' in str(e) or 'column "current_value" does not exist' in str(e) or 'column "notes" does not exist' in str(e):
+                # We trap the specific error here to remind the user of the manual DB fix
+                print(f"Database Schema Mismatch Error: {e}", file=sys.stderr)
+                return "Error fetching assets: Database schema mismatch. Please ensure columns 'description', 'current_value', and 'notes' exist in the 'assets' table.", 500
+            elif 'invalid input syntax for type integer' in str(e):
+                # New Check: If group_id is not an integer
+                print(f"Data Type Error: group_id in session is not an integer. Value: {group_id}", file=sys.stderr)
+                return "Error fetching assets: group_id in session is not an integer. Log out and log back in to correct the session data.", 500
+            else:
+                raise # Re-raise other programming errors
+        except Exception as e:
+            print(f"Error fetching assets: {e}", file=sys.stderr)
+            return f"Error fetching assets: {e}", 500
+
+
+        # 2. Fetch Expenses (last 30 days)
+        cur.execute('''
+            SELECT e.id, e.amount, e.description, e.date, c.name as category_name, u.username as user_name
+            FROM expenses e
+            JOIN categories c ON e.category_id = c.id
+            JOIN users u ON e.user_id = u.id
+            WHERE e.group_id = %s AND e.activate = TRUE AND e.date >= NOW() - INTERVAL '30 days'
+            ORDER BY e.date DESC, e.created_at DESC;
+        ''', (group_id,))
+        recent_expenses = cur.fetchall()
+
+        # 3. Calculate Expense Totals by Category for the month
+        cur.execute('''
+            SELECT c.name as category_name, SUM(e.amount) as total_spent
+            FROM expenses e
+            JOIN categories c ON e.category_id = c.id
+            WHERE e.group_id = %s 
+            AND e.activate = TRUE 
+            AND EXTRACT(YEAR FROM e.date) = EXTRACT(YEAR FROM CURRENT_DATE)
+            AND EXTRACT(MONTH FROM e.date) = EXTRACT(MONTH FROM CURRENT_DATE)
+            GROUP BY c.name
+            ORDER BY total_spent DESC;
+        ''', (group_id,))
+        category_totals = cur.fetchall()
         
-        if is_approved_tuple and is_approved_tuple[0]:
-            return redirect(url_for('index'))
+        # 4. Fetch Budgets
+        cur.execute('''
+            SELECT b.monthly_limit, c.name as category_name
+            FROM budgets b
+            JOIN categories c ON b.category_id = c.id
+            WHERE b.group_id = %s AND b.active = TRUE;
+        ''', (group_id,))
+        budgets = cur.fetchall()
+
+        # 5. Fetch Savings Goals
+        cur.execute('''
+            SELECT id, name, target_amount, current_amount, target_date
+            FROM savings_goals
+            WHERE group_id = %s AND active = TRUE
+            ORDER BY target_date;
+        ''', (group_id,))
+        goals = cur.fetchall()
+
+        # Combine totals and budgets for dashboard display
+        budget_summary = {}
+        for b in budgets:
+            budget_summary[b['category_name']] = {'limit': b['monthly_limit'], 'spent': 0}
             
+        for t in category_totals:
+            if t['category_name'] in budget_summary:
+                budget_summary[t['category_name']]['spent'] = t['total_spent']
+            else:
+                # Category exists but has no budget set
+                budget_summary[t['category_name']] = {'limit': None, 'spent': t['total_spent']}
+
+        # Calculate Net Worth (Assets - Debts)
+        net_worth = 0
+        for asset in assets:
+            if asset['type'] and 'Debt' in asset['type']:
+                net_worth -= asset['current_value']
+            else:
+                net_worth += asset['current_value']
+
+        return render_template('index.html', 
+                               assets=assets, 
+                               recent_expenses=recent_expenses,
+                               budget_summary=budget_summary,
+                               goals=goals,
+                               net_worth=net_worth)
+
+    except ConnectionError as e:
+        # ConnectionError is custom, handles missing DATABASE_URL or psycopg2 failure
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
-        print(f"Approval check error: {e}", file=sys.stderr)
+        # Catch-all for other unhandled exceptions
+        print(f"Error in index route: {e}", file=sys.stderr)
+        return f"An unexpected error occurred: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
             conn.close()
 
+# --- LOGIN/LOGOUT/APPROVAL ROUTES ---
+
+@app.route('/login', methods=('GET', 'POST'))
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        conn = None
+        error = None
+        
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Fetch user details including hashed password and group ID
+            cur.execute(
+                'SELECT id, hashed_password, group_id, is_approved FROM users WHERE username = %s;',
+                (username,)
+            )
+            user = cur.fetchone()
+
+            if user is None:
+                error = 'Incorrect username.'
+            elif not bcrypt.check_password_hash(user['hashed_password'], password):
+                error = 'Incorrect password.'
+            else:
+                # Login SUCCESS
+                session.clear()
+                session['user_id'] = user['id']
+                # *** CRITICAL FIX: Ensure the INTEGER group_id is stored ***
+                if user['group_id'] is not None:
+                    session['group_id'] = user['group_id']
+                else:
+                    # Handle case where user is registered but not yet assigned to a group (should be handled at registration)
+                    error = 'User not assigned to a group. Contact an admin.'
+                    
+                if error is None:
+                    # Check approval status immediately
+                    if user['is_approved']:
+                        return redirect(url_for('index'))
+                    else:
+                        return redirect(url_for('pending_approval'))
+
+        except ConnectionError:
+            error = "Database connection failed. Please try again later."
+        except Exception as e:
+            print(f"Login error: {e}", file=sys.stderr)
+            error = f"An unexpected error occurred during login: {e}"
+        finally:
+            if conn is not None:
+                conn.close()
+
+        if error:
+            return render_template('login.html', error=error)
+
+    return render_template('login.html')
+
+
+@app.route('/register', methods=('GET', 'POST'))
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        group_name = request.form['group_name'] # User provides existing group name or new name
+
+        conn = None
+        error = None
+        
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # 1. Check if username is already taken
+            cur.execute('SELECT id FROM users WHERE username = %s;', (username,))
+            if cur.fetchone() is not None:
+                error = f'User {username} is already registered.'
+
+            # 2. Check for existing group or create new one
+            group_id = None
+            cur.execute('SELECT id FROM groups WHERE name = %s;', (group_name,))
+            group_row = cur.fetchone()
+            
+            if group_row:
+                # Group exists, user is joining it. They will need admin approval.
+                group_id = group_row['id']
+                is_admin = False # Joining user is not admin
+                is_approved = False # Joining user needs approval
+            else:
+                # Group does not exist, user is creating a new one and is the admin.
+                cur.execute('INSERT INTO groups (name) VALUES (%s) RETURNING id;', (group_name,))
+                group_id = cur.fetchone()['id']
+                is_admin = True
+                is_approved = True # Admin is automatically approved
+
+            # 3. Hash password and insert user
+            hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+            
+            if group_id is not None:
+                cur.execute(
+                    '''
+                    INSERT INTO users (username, hashed_password, group_id, is_admin, is_approved) 
+                    VALUES (%s, %s, %s, %s, %s) 
+                    RETURNING id;
+                    ''',
+                    (username, hashed_password, group_id, is_admin, is_approved)
+                )
+                user_id = cur.fetchone()['id']
+                
+                # 4. If new group, update group's admin_user_id
+                if is_admin:
+                    cur.execute(
+                        'UPDATE groups SET admin_user_id = %s WHERE id = %s;',
+                        (user_id, group_id)
+                    )
+                    
+                conn.commit()
+                
+                # Registration Success - Set session and redirect
+                session.clear()
+                session['user_id'] = user_id
+                # *** CRITICAL FIX: Ensure the INTEGER group_id is stored ***
+                session['group_id'] = group_id
+                
+                if is_approved:
+                    return redirect(url_for('index'))
+                else:
+                    return redirect(url_for('pending_approval'))
+
+        except psycopg2.IntegrityError as e:
+            conn.rollback()
+            if 'duplicate key value violates unique constraint' in str(e):
+                error = 'A user with that username already exists.'
+            else:
+                error = 'An integrity error occurred. Please check your inputs.'
+        except ConnectionError:
+            error = "Database connection failed. Please try again later."
+        except Exception as e:
+            conn.rollback()
+            print(f"Registration error: {e}", file=sys.stderr)
+            error = f"An unexpected error occurred during registration: {e}"
+        finally:
+            if conn is not None:
+                conn.close()
+
+        return render_template('register.html', error=error)
+
+# ... (other routes follow)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/pending_approval')
+def pending_approval():
     return render_template('pending_approval.html')
 
 
-# --- GROUP MANAGEMENT ROUTES ---
-
-@app.route('/group_management')
+@app.route('/categories')
 @login_required
-def group_management():
-    """
-    View for the user to see their current group ID and options to create/join a new one.
-    """
-    # g.username and g.group_id are guaranteed to exist by login_required
-    return render_template('group_management.html', 
-                           group_id=g.group_id, 
-                           username=g.username,
-                           is_default_group=(g.group_id == DEFAULT_GROUP_ID))
-
-@app.route('/create_group', methods=['POST'])
-@login_required
-def create_group():
-    """
-    Creates a new unique group ID and updates the current user's group_id.
-    """
+def categories():
+    group_id = session.get('group_id')
     conn = None
-    new_group_id = generate_unique_group_id()
-
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # 1. Update the user's group_id in public.users
-        cur.execute("""
-            UPDATE public.users SET group_id = %s WHERE id = %s;
-        """, (new_group_id, g.user_id))
-
-        conn.commit()
-        
-        # 2. Update the session/g object with the new group ID
-        session['group_id'] = new_group_id
-        g.group_id = new_group_id
-        
-        flash(f"Successfully created and joined a new group: {new_group_id}. Share this ID!", 'success')
-        return redirect(url_for('group_management'))
-        
-    except ConnectionError:
-        flash("Database connection failed during group creation.", 'error')
+        cur.execute('SELECT id, name FROM categories WHERE group_id = %s ORDER BY name;', (group_id,))
+        categories = cur.fetchall()
+        return render_template('categories.html', categories=categories)
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
-        if conn: conn.rollback()
-        print(f"Error creating group: {e}", file=sys.stderr)
-        flash("An unexpected error occurred during group creation.", 'error')
+        print(f"Error fetching categories: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
             conn.close()
-            
-    return redirect(url_for('group_management'))
-    
-@app.route('/join_group', methods=['POST'])
+
+@app.route('/add_category', methods=['POST'])
 @login_required
-def join_group():
-    """
-    Allows a user (typically from the default group) to join an existing group.
-    """
-    target_group_id = request.form.get('target_group_id', '').strip()
+def add_category():
+    group_id = session.get('group_id')
+    category_name = request.form['name'].strip()
     
-    if not target_group_id:
-        flash("You must enter a Group ID to join.", 'error')
-        return redirect(url_for('group_management'))
+    if not category_name:
+        return redirect(url_for('categories'))
         
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # 1. Check if the target_group_id actually exists in public.users (i.e., someone is in it)
-        cur.execute("SELECT group_id FROM public.users WHERE group_id = %s LIMIT 1;", (target_group_id,))
-        if cur.fetchone() is None:
-            flash(f"Group ID '{target_group_id}' does not exist or has no members.", 'error')
-            return redirect(url_for('group_management'))
-            
-        # 2. Update the current user's group_id
-        cur.execute("""
-            UPDATE public.users SET group_id = %s WHERE id = %s;
-        """, (target_group_id, g.user_id))
-
+        cur.execute('INSERT INTO categories (group_id, name) VALUES (%s, %s);', (group_id, category_name))
         conn.commit()
-        
-        # 3. Update the session/g object
-        session['group_id'] = target_group_id
-        g.group_id = target_group_id
-        
-        flash(f"Successfully joined group: {target_group_id}.", 'success')
-        return redirect(url_for('index'))
-        
-    except ConnectionError:
-        flash("Database connection failed during group joining.", 'error')
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        # Handle case where category name is not unique within the group
+        return render_template('categories.html', categories=[], error=f"Category '{category_name}' already exists in your group."), 400
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
-        if conn: conn.rollback()
-        print(f"Error joining group: {e}", file=sys.stderr)
-        flash("An unexpected error occurred while trying to join the group.", 'error')
+        conn.rollback()
+        print(f"Error adding category: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
             conn.close()
             
-    return redirect(url_for('group_management'))
+    return redirect(url_for('categories'))
 
-# --- ASSET/EXPENSE ROUTES (Unchanged, rely on login_required for isolation) ---
-
-@app.route('/api/assets/<int:asset_id>')
+@app.route('/delete_category/<int:category_id>', methods=['POST'])
 @login_required
-def view_asset_details(asset_id):
-    """
-    Fetches the details of a single asset and its associated expenses.
-    """
+def delete_category(category_id):
     conn = None
-    asset = None
-    expenses = []
-
     try:
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # 1. Fetch Asset Details (CRITICAL: Filter public.assets by group_id)
-        cur.execute("""
-            SELECT id, name, type, current_value, currency, description, added_date, last_updated
-            FROM public.assets
-            WHERE id = %s AND group_id = %s AND activate = TRUE;
-        """, (asset_id, g.group_id))
+        cur = conn.cursor()
         
-        asset = cur.fetchone()
+        # Check if the category is used in any active expense or budget
+        cur.execute('SELECT id FROM expenses WHERE category_id = %s AND activate = TRUE LIMIT 1;', (category_id,))
+        if cur.fetchone():
+            return render_template('categories.html', categories=[], error="Cannot delete category: It is currently used in active expenses. Please re-assign expenses first."), 400
 
-        if asset is None:
-            return "Asset not found or access denied.", 404
-
-        # 2. Fetch Associated Expenses (Assuming public.expenses is linked via asset_id)
-        cur.execute("""
-            SELECT id, amount, category, date, description, activate
-            FROM public.expenses 
-            WHERE asset_id = %s AND activate = TRUE
-            ORDER BY date DESC;
-        """, (asset_id,))
+        cur.execute('SELECT id FROM budgets WHERE category_id = %s AND active = TRUE LIMIT 1;', (category_id,))
+        if cur.fetchone():
+             return render_template('categories.html', categories=[], error="Cannot delete category: It is currently used in an active budget."), 400
+             
+        # Delete the category
+        cur.execute('DELETE FROM categories WHERE id = %s;', (category_id,))
+        conn.commit()
         
-        expenses = cur.fetchall()
-
-    except ConnectionError:
-        return "Database connection failed.", 500
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
-        print(f"Error fetching asset details: {e}", file=sys.stderr)
-        return "An internal error occurred.", 500
+        conn.rollback()
+        print(f"Error deleting category: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('categories'))
+
+@app.route('/expenses')
+@login_required
+def expenses():
+    group_id = session.get('group_id')
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Fetch all active expenses for the group
+        cur.execute('''
+            SELECT 
+                e.id, 
+                e.amount, 
+                e.description, 
+                e.date, 
+                c.name as category_name, 
+                u.username as user_name
+            FROM expenses e
+            JOIN categories c ON e.category_id = c.id
+            JOIN users u ON e.user_id = u.id
+            WHERE e.group_id = %s AND e.activate = TRUE
+            ORDER BY e.date DESC, e.created_at DESC;
+        ''', (group_id,))
+        all_expenses = cur.fetchall()
+
+        # Fetch categories and users for the form
+        cur.execute('SELECT id, name FROM categories WHERE group_id = %s ORDER BY name;', (group_id,))
+        categories = cur.fetchall()
+        
+        # Only fetch users who are part of the current group
+        cur.execute('SELECT id, username FROM users WHERE group_id = %s AND is_approved = TRUE ORDER BY username;', (group_id,))
+        users = cur.fetchall()
+
+        return render_template('expenses.html', 
+                               all_expenses=all_expenses, 
+                               categories=categories,
+                               users=users)
+        
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Error fetching expenses data: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
             conn.close()
 
-    return render_template('asset_details.html', asset=asset, expenses=expenses)
-
-
-@app.route('/api/add_expense', methods=['POST'])
+@app.route('/add_expense', methods=['POST'])
 @login_required
 def add_expense():
-    """
-    Adds a new expense to an existing asset.
-    """
-    asset_id = request.form.get('asset_id', type=int)
-    amount = request.form.get('amount', type=float)
-    category = request.form.get('category')
-    description = request.form.get('description')
-    date_str = request.form.get('date')
+    group_id = session.get('group_id')
+    user_id = session.get('user_id') # Current logged in user is the default expense creator
 
-    if not all([asset_id, amount, category, date_str]):
-        return "Missing required expense fields.", 400
+    try:
+        amount = float(request.form['amount'])
+        description = request.form['description'].strip()
+        date = request.form['date']
+        category_id = request.form['category_id']
+        
+        # Optional: allow the user to submit an expense on behalf of another user in the group
+        expense_user_id = request.form.get('expense_user_id', user_id) 
+
+    except ValueError:
+        return "Invalid amount or data format.", 400
+    
+    if amount <= 0:
+        return "Amount must be positive.", 400
 
     conn = None
     try:
-        # Validate that the asset exists and belongs to the user's group
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Check asset existence and ownership in public.assets
-        cur.execute("SELECT id FROM public.assets WHERE id = %s AND group_id = %s;", (asset_id, g.group_id))
-        if cur.fetchone() is None:
-            return "Asset not found or you do not have permission to modify it.", 403
-
-        # Insert the new expense into public.expenses
-        cur.execute("""
-            INSERT INTO public.expenses (asset_id, amount, category, description, date, activate)
-            VALUES (%s, %s, %s, %s, %s, TRUE);
-        """, (asset_id, amount, category, description, date_str))
-
+        cur.execute(
+            '''
+            INSERT INTO expenses (group_id, user_id, amount, description, date, category_id)
+            VALUES (%s, %s, %s, %s, %s, %s);
+            ''',
+            (group_id, expense_user_id, amount, description, date, category_id)
+        )
         conn.commit()
-        return redirect(url_for('view_asset_details', asset_id=asset_id))
-        
-    except ConnectionError:
-        return "Database Connection Error: Cannot add expense.", 500
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
-        if conn: conn.rollback()
+        conn.rollback()
         print(f"Error adding expense: {e}", file=sys.stderr)
-        return f"An error occurred adding expense: {e}", 500
+        return f"An error occurred: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
             conn.close()
+            
+    return redirect(url_for('expenses'))
 
-@app.route('/api/delete_expense/<int:expense_id>', methods=['POST'])
+
+@app.route('/delete_expense/<int:expense_id>', methods=['POST'])
 @login_required
 def delete_expense(expense_id):
-    """
-    Marks an expense as inactive (soft delete).
-    CRITICAL: Must verify the expense belongs to an asset in the user's group.
-    """
+    """Marks an expense as inactive (soft delete)."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple['is_approved']: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Delete expense route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+                
+    # Proceed with original logic...
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # 1. Find the asset_id associated with the expense_id in public.expenses
-        cur.execute("SELECT asset_id FROM public.expenses WHERE id = %s;", (expense_id,))
-        result = cur.fetchone()
-        
-        if result is None:
-            return "Expense not found.", 404
-            
-        asset_id = result[0]
-
-        # 2. Verify asset ownership for the current group in public.assets
-        cur.execute("SELECT id FROM public.assets WHERE id = %s AND group_id = %s;", (asset_id, g.group_id))
-        if cur.fetchone() is None:
-            return "Access denied: This expense is not part of your group's assets.", 403
-
-        # 3. Soft-delete the expense in public.expenses
-        cur.execute('UPDATE public.expenses SET activate = FALSE WHERE id = %s;', (expense_id,))
+        cur.execute('UPDATE expenses SET activate = FALSE WHERE id = %s;', (expense_id,))
         conn.commit()
-        
-        # Redirect back to the asset details page
-        return redirect(url_for('view_asset_details', asset_id=asset_id))
-        
-    except ConnectionError:
-        return "Database Connection Error: Cannot delete expense.", 500
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
         if conn: conn.rollback()
         print(f"Expense deletion error: {e}", file=sys.stderr)
         return f"An error occurred deleting expense: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
             conn.close()
             
-@app.route('/api/summary')
+    return redirect(url_for('expenses'))
+
+
+@app.route('/budgets')
 @login_required
-def summary():
-    """
-    Generates a financial summary (e.g., total asset value, asset type breakdown)
-    for the current user's group.
-    """
+def budgets():
+    group_id = session.get('group_id')
     conn = None
-    summary_data = {
-        'total_value': 0.0,
-        'breakdown': {}
-    }
-        
     try:
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor()
         
-        # 1. Total Asset Value and Breakdown by Type (CRITICAL: Filter public.assets by group_id)
-        cur.execute("""
-            SELECT type, SUM(current_value) AS total_value, currency, COUNT(id) as count
-            FROM public.assets
-            WHERE activate = TRUE AND group_id = %s
-            GROUP BY type, currency;
-        """, (g.group_id,))
+        # 1. Fetch active budgets with category names
+        cur.execute('''
+            SELECT b.id, b.monthly_limit, c.name as category_name
+            FROM budgets b
+            JOIN categories c ON b.category_id = c.id
+            WHERE b.group_id = %s AND b.active = TRUE
+            ORDER BY c.name;
+        ''', (group_id,))
+        active_budgets = cur.fetchall()
         
-        raw_breakdown = cur.fetchall()
-        
-        # Process breakdown for display (simple aggregation by type)
-        for item in raw_breakdown:
-            key = f"{item['type']} ({item['currency']})"
-            summary_data['breakdown'][key] = {
-                'total_value': float(item['total_value']),
-                'count': item['count']
-            }
+        # 2. Fetch categories that DO NOT currently have an active budget for the form
+        cur.execute('''
+            SELECT c.id, c.name
+            FROM categories c
+            LEFT JOIN budgets b ON c.id = b.category_id AND b.group_id = %s AND b.active = TRUE
+            WHERE c.group_id = %s AND b.id IS NULL
+            ORDER BY c.name;
+        ''', (group_id, group_id))
+        available_categories = cur.fetchall()
 
-        # 2. Latest Exchange Rates for client-side display
-        rates = get_exchange_rates()
-        summary_data['rates'] = rates
-        summary_data['base_currency'] = BASE_CURRENCY
+        return render_template('budgets.html', 
+                               active_budgets=active_budgets, 
+                               available_categories=available_categories)
         
-        
-    except ConnectionError:
-        return "Database connection failed.", 500
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
     except Exception as e:
-        print(f"Error generating summary: {e}", file=sys.stderr)
-        return "An internal error occurred while generating the summary.", 500
+        print(f"Error fetching budgets data: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
     finally:
-        if conn:
+        if conn is not None:
+            conn.close()
+
+@app.route('/add_budget', methods=['POST'])
+@login_required
+def add_budget():
+    group_id = session.get('group_id')
+    
+    try:
+        category_id = request.form['category_id']
+        monthly_limit = float(request.form['monthly_limit'])
+    except ValueError:
+        return "Invalid amount or data format.", 400
+    
+    if monthly_limit <= 0:
+        return "Budget limit must be positive.", 400
+        
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Insert new budget (assuming active=TRUE and start_date=CURRENT_DATE)
+        cur.execute(
+            '''
+            INSERT INTO budgets (group_id, category_id, monthly_limit, start_date, active)
+            VALUES (%s, %s, %s, CURRENT_DATE, TRUE);
+            ''',
+            (group_id, category_id, monthly_limit)
+        )
+        conn.commit()
+
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return "A budget already exists for this category.", 400
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error adding budget: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
             conn.close()
             
-    return render_template('summary.html', summary=summary_data, group_id=g.group_id)
+    return redirect(url_for('budgets'))
 
-# --- RUN THE APP ---
+
+@app.route('/delete_budget/<int:budget_id>', methods=['POST'])
+@login_required
+def delete_budget(budget_id):
+    """Deactivates a budget (soft delete)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Simply mark as inactive instead of deleting permanently
+        cur.execute('UPDATE budgets SET active = FALSE WHERE id = %s;', (budget_id,))
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting budget: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('budgets'))
+
+# --- ASSETS ROUTES ---
+
+@app.route('/assets')
+@login_required
+def assets():
+    group_id = session.get('group_id')
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Fetch all active assets for the group
+        # NOTE: This is the query that threw the error. It needs the integer group_id.
+        cur.execute('''
+            SELECT id, name, type, description, current_value, currency, notes, last_updated 
+            FROM assets 
+            WHERE group_id = %s AND active = TRUE
+            ORDER BY name;
+        ''', (group_id,))
+        all_assets = cur.fetchall()
+
+        # Define asset types for the form/template
+        asset_types = ['Checking', 'Savings', 'Investment', 'Cash', 'Debt (Credit Card)', 'Debt (Loan)', 'Other']
+
+        return render_template('assets.html', 
+                               all_assets=all_assets,
+                               asset_types=asset_types)
+        
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        # Check for the specific error to provide a more helpful message
+        if 'invalid input syntax for type integer' in str(e):
+             print(f"Data Type Error: group_id in session is not an integer. Value: {session.get('group_id')}", file=sys.stderr)
+             return "Error fetching assets: group_id in session is not an integer. Log out and log back in to correct the session data.", 500
+
+        print(f"Error fetching assets data: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+
+@app.route('/add_asset', methods=['POST'])
+@login_required
+def add_asset():
+    group_id = session.get('group_id')
+    
+    try:
+        name = request.form['name'].strip()
+        asset_type = request.form['type'].strip()
+        current_value = float(request.form['current_value'])
+        description = request.form.get('description', '').strip()
+        notes = request.form.get('notes', '').strip()
+        currency = request.form.get('currency', 'USD').strip()
+    except ValueError:
+        return "Invalid current value format.", 400
+    
+    if not name or not asset_type:
+        return "Asset name and type are required.", 400
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            '''
+            INSERT INTO assets (group_id, name, type, description, current_value, notes, currency)
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
+            ''',
+            (group_id, name, asset_type, description, current_value, notes, currency)
+        )
+        conn.commit()
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return "An asset with that name already exists in your group.", 400
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error adding asset: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('assets'))
+
+
+@app.route('/update_asset_value/<int:asset_id>', methods=['POST'])
+@login_required
+def update_asset_value(asset_id):
+    group_id = session.get('group_id')
+    
+    try:
+        new_value = float(request.form['new_value'])
+    except ValueError:
+        return "Invalid value format.", 400
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Ensure the asset belongs to the user's group before updating
+        cur.execute('SELECT id FROM assets WHERE id = %s AND group_id = %s;', (asset_id, group_id))
+        if cur.fetchone() is None:
+            return "Asset not found or unauthorized.", 403
+            
+        cur.execute(
+            '''
+            UPDATE assets SET current_value = %s, last_updated = CURRENT_TIMESTAMP
+            WHERE id = %s;
+            ''',
+            (new_value, asset_id)
+        )
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error updating asset value: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('assets'))
+
+
+@app.route('/delete_asset/<int:asset_id>', methods=['POST'])
+@login_required
+def delete_asset(asset_id):
+    """Marks an asset as inactive (soft delete)."""
+    group_id = session.get('group_id')
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Ensure the asset belongs to the user's group before deleting
+        cur.execute('SELECT id FROM assets WHERE id = %s AND group_id = %s;', (asset_id, group_id))
+        if cur.fetchone() is None:
+            return "Asset not found or unauthorized.", 403
+            
+        cur.execute(
+            '''
+            UPDATE assets SET active = FALSE
+            WHERE id = %s;
+            ''',
+            (asset_id,)
+        )
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting asset: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('assets'))
+
+
+# --- SAVINGS GOALS ROUTES ---
+
+@app.route('/goals')
+@login_required
+def goals():
+    group_id = session.get('group_id')
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Fetch all active savings goals for the group
+        cur.execute('''
+            SELECT id, name, target_amount, current_amount, target_date
+            FROM savings_goals
+            WHERE group_id = %s AND active = TRUE
+            ORDER BY target_date;
+        ''', (group_id,))
+        all_goals = cur.fetchall()
+
+        return render_template('goals.html', 
+                               all_goals=all_goals)
+        
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Error fetching goals data: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+
+@app.route('/add_goal', methods=['POST'])
+@login_required
+def add_goal():
+    group_id = session.get('group_id')
+    
+    try:
+        name = request.form['name'].strip()
+        target_amount = float(request.form['target_amount'])
+        target_date = request.form['target_date']
+        # Current amount can be optional, default to 0.00
+        current_amount = float(request.form.get('current_amount', 0.00)) 
+    except ValueError:
+        return "Invalid amount or data format.", 400
+    
+    if target_amount <= 0:
+        return "Target amount must be positive.", 400
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            '''
+            INSERT INTO savings_goals (group_id, name, target_amount, current_amount, target_date)
+            VALUES (%s, %s, %s, %s, %s);
+            ''',
+            (group_id, name, target_amount, current_amount, target_date)
+        )
+        conn.commit()
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        return "A goal with that name already exists in your group.", 400
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error adding goal: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('goals'))
+
+
+@app.route('/update_goal_amount/<int:goal_id>', methods=['POST'])
+@login_required
+def update_goal_amount(goal_id):
+    group_id = session.get('group_id')
+    
+    try:
+        # Use 'add_amount' to incrementally update the goal
+        add_amount = float(request.form['add_amount'])
+    except ValueError:
+        return "Invalid amount format.", 400
+        
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Ensure the goal belongs to the user's group before updating
+        cur.execute('SELECT id FROM savings_goals WHERE id = %s AND group_id = %s;', (goal_id, group_id))
+        if cur.fetchone() is None:
+            return "Goal not found or unauthorized.", 403
+            
+        # Update the current_amount by adding the new contribution
+        cur.execute(
+            '''
+            UPDATE savings_goals 
+            SET current_amount = current_amount + %s
+            WHERE id = %s;
+            ''',
+            (add_amount, goal_id)
+        )
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error updating goal amount: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('goals'))
+
+
+@app.route('/delete_goal/<int:goal_id>', methods=['POST'])
+@login_required
+def delete_goal(goal_id):
+    """Marks a goal as inactive (soft delete)."""
+    group_id = session.get('group_id')
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Ensure the goal belongs to the user's group before deleting
+        cur.execute('SELECT id FROM savings_goals WHERE id = %s AND group_id = %s;', (goal_id, group_id))
+        if cur.fetchone() is None:
+            return "Goal not found or unauthorized.", 403
+            
+        cur.execute(
+            '''
+            UPDATE savings_goals SET active = FALSE
+            WHERE id = %s;
+            ''',
+            (goal_id,)
+        )
+        conn.commit()
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting goal: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('goals'))
+
+# --- USER MANAGEMENT ROUTES ---
+
+@app.route('/admin/users')
+@login_required
+def admin_users():
+    group_id = session.get('group_id')
+    user_id = session.get('user_id')
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Check if the current user is an admin
+        cur.execute('SELECT is_admin FROM users WHERE id = %s AND group_id = %s;', (user_id, group_id))
+        user_row = cur.fetchone()
+        if not user_row or not user_row['is_admin']:
+            return "Access Denied: You must be an administrator to view this page.", 403
+            
+        # 2. Fetch all users in the group
+        cur.execute('''
+            SELECT id, username, is_admin, is_approved 
+            FROM users 
+            WHERE group_id = %s 
+            ORDER BY is_approved DESC, username;
+        ''', (group_id,))
+        users = cur.fetchall()
+
+        return render_template('admin_users.html', users=users)
+        
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Error fetching admin user data: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+
+@app.route('/admin/approve_user/<int:user_to_approve_id>', methods=['POST'])
+@login_required
+def approve_user(user_to_approve_id):
+    group_id = session.get('group_id')
+    admin_user_id = session.get('user_id')
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Security check: Must be an admin AND the target user must be in the same group
+        cur.execute('SELECT is_admin FROM users WHERE id = %s AND group_id = %s;', (admin_user_id, group_id))
+        admin_row = cur.fetchone()
+        
+        if not admin_row or not admin_row['is_admin']:
+            return "Access Denied: Not an administrator.", 403
+            
+        # Perform the approval
+        cur.execute(
+            'UPDATE users SET is_approved = TRUE WHERE id = %s AND group_id = %s;',
+            (user_to_approve_id, group_id)
+        )
+        conn.commit()
+        
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        conn.rollback()
+        print(f"Error approving user: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+            
+    return redirect(url_for('admin_users'))
+
+# --- MAIN RUN BLOCK ---
+
 if __name__ == '__main__':
-    # Use environment variable for port, default to 5000
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # This is useful for debugging locally, but the production environment (Render) 
+    # will handle the running of the application.
+    app.run(debug=True)

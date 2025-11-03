@@ -42,536 +42,1009 @@ def get_exchange_rates():
     key = EXCHANGE_RATE_API_KEY # Use the securely read environment variable
     
     if not key:
-        print("WARNING: EXCHANGE_RATE_API_KEY not set. Currency conversion disabled.", file=sys.stderr)
-        return None
-    
-    # Using the ExchangeRate-API free tier (USD base)
-    url = f"https://v6.exchangerate-api.com/v6/{key}/latest/USD"
-    
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-        data = response.json()
+        print("WARNING: EXCHANGE_RATE_API_KEY is missing. Using fallback rates.", file=sys.stderr)
+        # Fallback rates if API key is missing
+        return {'USD': 1.0, 'INR': 83.0, 'EUR': 0.9, 'GBP': 0.8}
         
-        if data['result'] == 'success':
-            return data['conversion_rates']
-        else:
-            print(f"API Error: {data.get('error-type', 'Unknown error')}", file=sys.stderr)
-            return None
-            
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching exchange rates: {e}", file=sys.stderr)
-        return None
-    
+    url = f'https://v6.exchangerate-api.com/v6/{key}/latest/USD'
+    response = requests.get(url)
+    data = response.json()
+    if data.get('result') == 'success':
+        return data['conversion_rates']
+    else:
+        print(f"ERROR: Exchange rate API call failed. Status: {data.get('result')}. Using fallback rates.", file=sys.stderr)
+        # Fallback rates if API call fails
+        return {'USD': 1.0, 'INR': 83.0, 'EUR': 0.9, 'GBP': 0.8}
+
+
 def get_db_connection():
-    """Establishes a connection to the PostgreSQL database."""
+    """Establishes and returns a connection to the PostgreSQL database using DSN."""
     if not DATABASE_URL:
-        raise ConnectionError("DATABASE_URL environment variable is not set.")
+        # Halts execution if critical config is missing (will propagate a 500 error to user)
+        raise ConnectionError("DATABASE_URL environment variable not found. Cannot connect to database.")
+
     try:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        # Connect using the DSN string provided by the hosting service (e.g., Neon)
+        conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
-        # Log the connection error details
-        print(f"Database connection failed: {e}", file=sys.stderr)
-        raise ConnectionError("Could not connect to the database.") from e
+        print(f"Database connection failed using DSN: {e}", file=sys.stderr)
+        # Convert psycopg2 error to a custom error for cleaner stack traces
+        raise ConnectionError(f"Failed to connect to database: {e}")
 
-# --- AUTH DECORATOR ---
+# --- AUTHENTICATION DECORATORS ---
 
 def login_required(view):
-    """Decorator that ensures a user is logged in before allowing access to a view."""
+    """Decorator that ensures a user is logged in before allowing access."""
     @functools.wraps(view)
     def wrapped_view(**kwargs):
-        # 1. Check if user_id is in session
-        if session.get('user_id') is None:
+        if 'user_id' not in session:
+            # Redirect to the login page if not logged in
             return redirect(url_for('login'))
+        return view(**kwargs)
+    return wrapped_view
+
+def admin_required(view):
+    """
+    Decorator that ensures the logged-in user is the hardcoded admin (user_id=1).
+    Note: This must be placed AFTER @login_required.
+    """
+    @functools.wraps(view)
+    def wrapped_view(**kwargs):
+        user_id = session.get('user_id')
         
-        # 2. Check for approval (after successful login)
-        user_id = session['user_id']
-        is_approved = False
+        # We assume @login_required ran first, so user_id is in session.
+        # Check if the user is the hardcoded admin (ID 1)
+        if user_id != 1:
+            # Render the custom error template for access denial
+            return render_template('error.html', message="Access Denied: You must be an administrator to view this page."), 403
+            
+        return view(**kwargs)
+    return wrapped_view
+
+
+# --- AUTH ROUTES ---
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    """Handles user registration and password hashing."""
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        # Hash the password securely
+        password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            # NEW: Insert new users with is_approved = FALSE
+            cur.execute('INSERT INTO users (username, password_hash, is_approved) VALUES (%s, %s, FALSE) RETURNING id;', (username, password_hash))
+            user_id = cur.fetchone()[0]
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            # Automatically log in the user and redirect to the pending page
+            session['user_id'] = user_id
+            session['username'] = username
+            return redirect(url_for('pending_approval')) # NEW REDIRECT
+
+        except psycopg2.IntegrityError:
+            # Handle case where username already exists
+            return render_template('register.html', error='Username already taken. Please choose another.')
+        except ConnectionError as e:
+            return render_template('register.html', error=f'Connection Error: {e}')
+        except Exception as e:
+            # Log and handle other errors
+            print(f"Registration error: {e}")
+            return render_template('register.html', error=f'An error occurred: {e}')
+
+    return render_template('register.html', error=None)
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Handles user login and session creation."""
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            # NEW: Select the is_approved column
+            cur.execute('SELECT id, password_hash, is_approved FROM users WHERE username = %s;', (username,))
+            user = cur.fetchone()
+            cur.close()
+            conn.close()
+        except ConnectionError as e:
+            return render_template('login.html', error=f'Connection Error: {e}')
+        except Exception as e:
+            return render_template('login.html', error=f'An error occurred during lookup: {e}')
+
+        if user and bcrypt.check_password_hash(user['password_hash'], password):
+            
+            # Login successful (credentials verified), now check approval status
+            session['user_id'] = user['id']
+            session['username'] = username
+
+            if not user.get('is_approved'):
+                # Redirect unapproved users to the pending page
+                return redirect(url_for('pending_approval'))
+            
+            # Standard successful login for an approved user
+            return redirect(url_for('home'))
+        else:
+            # Login failed
+            return render_template('login.html', error='Invalid username or password.')
+
+    return render_template('login.html', error=None)
+
+
+@app.route('/logout')
+def logout():
+    """Clears the session and logs the user out."""
+    session.pop('user_id', None)
+    session.pop('username', None)
+    return redirect(url_for('login'))
+
+# --- NEW PENDING APPROVAL ROUTE ---
+@app.route('/pending')
+@login_required # Ensure they are logged in before showing the pending page
+def pending_approval():
+    """Displays the page notifying the user their account is pending approval."""
+    return render_template('pending_approval.html')
+
+# --- NEW ADMIN APPROVAL ROUTE ---
+@app.route('/admin/approve', methods=['GET', 'POST'])
+@login_required # Must be logged in
+@admin_required # Must be user ID 1
+def admin_approve_users():
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        if request.method == 'POST':
+            user_id_to_approve = request.form.get('user_id')
+            if user_id_to_approve:
+                # Update the database to approve the user
+                cur.execute('UPDATE users SET is_approved = TRUE WHERE id = %s;', (user_id_to_approve,))
+                conn.commit()
+                # Use a standard redirect/refresh to update the list
+
+        # Fetch all unapproved users
+        cur.execute('SELECT id, username FROM users WHERE is_approved = FALSE ORDER BY id;')
+        pending_users = cur.fetchall()
+        
+        cur.close()
+        return render_template('admin_approve_users.html', pending_users=pending_users)
+
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Admin approval error: {e}", file=sys.stderr)
+        if conn: conn.rollback()
+        return f"An error occurred during approval process: {e}", 500
+    finally:
+        if conn is not None:
+            conn.close()
+
+# --- HELPER FUNCTION: Get Owners ---
+def get_owners():
+# ... (rest of the get_owners function is unchanged) ...
+    """Fetches all owner records (id and name) from the database."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT id, name FROM owners ORDER BY name;')
+        owners = cur.fetchall()
+        cur.close()
+        return owners
+    except ConnectionError:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+# ----------------------------------------
+
+# --- ADDITION for asset type pie chart ---
+def get_asset_type_distribution():
+# ... (rest of the get_asset_type_distribution function is unchanged) ...
+    """Fetches total asset value grouped by asset type (for pie chart)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT type, SUM(value) as total_value
+            FROM assets
+            WHERE activate = TRUE
+            GROUP BY type
+            ORDER BY total_value DESC
+        """)
+        data = cur.fetchall()
+        cur.close()
+        return data
+    except ConnectionError:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+# ----------------------------------------
+
+
+# --- PROTECTED APPLICATION ROUTES ---
+
+
+@app.route('/home')
+@login_required # PROTECTED
+def home():
+    """Dashboard view showing aggregated assets, expenses, and net worth."""
+    
+    # NEW CHECK: Ensure the user is approved before running the full dashboard logic
+    user_id = session.get('user_id')
+    if user_id:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur.fetchone()
+            # is_approved_tuple will be (True,) or (False,)
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            # If DB check fails, log and let the user access (better than hard crash)
+            print(f"Home route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn is not None:
+                conn.close()
+                
+    # Proceed with dashboard data fetching only if approved
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch assets
+        cur.execute('''
+            SELECT a.*, o.name AS owner_name
+            FROM assets a
+            JOIN owners o ON a.owner_id = o.id
+            WHERE a.activate = TRUE;
+        ''')
+        assets = cur.fetchall()
+        
+        # Fetch expenses
+        cur.execute('''
+            SELECT e.*, o.name AS owner_name
+            FROM expenses e
+            JOIN owners o ON e.owner_id = o.id
+            WHERE e.activate = TRUE;
+        ''')
+        expenses = cur.fetchall()
+        cur.close()
+    
+    except ConnectionError as e:
+        print(f"Home route DB error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load dashboard data.", 500
+    finally:
+        if conn is not None:
+            conn.close()
+
+    rates = get_exchange_rates()
+
+    total_asset_usd = 0
+    total_asset_inr = 0
+    for asset in assets:
+        cur_currency = asset['currency']
+        try:
+            value = float(asset['value'])
+        except (TypeError, ValueError):
+            value = 0
+        
+        # Convert to USD
+        if cur_currency == 'USD':
+            value_usd = value
+        else:
+            rate_to_usd = rates.get(cur_currency, None)
+            value_usd = round(value / rate_to_usd, 2) if rate_to_usd and rate_to_usd != 0 else 0
+            
+        # Convert to INR
+        value_inr = round(value_usd * rates.get('INR', 83), 2)
+        total_asset_usd += value_usd
+        total_asset_inr += value_inr
+
+
+    total_expense_usd = 0
+    total_expense_inr = 0
+    for expense in expenses:
+        cur_currency = expense['currency']
+        try:
+            amount = float(expense['amount'])
+        except (TypeError, ValueError):
+            amount = 0
+            
+        # Convert to USD
+        if cur_currency == 'USD':
+            amount_usd = amount
+        else:
+            rate_to_usd = rates.get(cur_currency, None)
+            amount_usd = round(amount / rate_to_usd, 2) if rate_to_usd and rate_to_usd != 0 else 0
+            
+        # Convert to INR
+        amount_inr = round(amount_usd * rates.get('INR', 83), 2)
+        total_expense_usd += amount_usd
+        total_expense_inr += amount_inr
+
+
+    # --- ADDITION: fetch asset type distribution for pie chart ---
+    asset_type_data = get_asset_type_distribution()
+    # -------------------------------------------------------------
+
+
+    net_usd = round(total_asset_usd - total_expense_usd, 2)
+    net_inr = round(total_asset_inr - total_expense_inr, 2)
+
+
+    # --- ADDITION: include asset_type_data in template context ---
+    return render_template('home.html',
+        total_asset_usd=round(total_asset_usd, 2),
+        total_asset_inr=round(total_asset_inr, 2),
+        total_expense_usd=round(total_expense_usd, 2),
+        total_expense_inr=round(total_expense_inr, 2),
+        net_usd=net_usd,
+        net_inr=net_inr,
+        asset_type_data=asset_type_data
+    )
+    # -------------------------------------------------------------
+
+
+# --- INDEX/ASSETS LISTING ROUTE ---
+@app.route('/')
+@login_required # PROTECTED
+def index():
+    """Lists all active assets with sorting and currency conversion."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Index route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn is not None:
+                conn.close()
+    
+    # Proceed with original logic...
+    sort_by = request.args.get('sort_by', 'value_usd')
+    order = request.args.get('order', 'desc')
+
+
+    # Allowed columns for database sorting (native columns)
+    db_sort_columns = ['id', 'type', 'name', 'country', 'currency', 'value', 'last_updated']
+    # Columns for Python/in-memory sorting (calculated values)
+    python_sort_columns = ['owner_name', 'value_usd'] 
+
+    # Check if sorting on a database column
+    if sort_by in db_sort_columns:
+        sort_column = f'a.{sort_by}'
+        order_db = 'asc' if order.lower() == 'asc' else 'desc'
+    elif sort_by == 'owner_name':
+        sort_column = 'o.name'
+        order_db = 'asc' if order.lower() == 'asc' else 'desc'
+    else:
+        # Default to DB sorting by ID if calculated field is requested first
+        sort_column = 'a.id'
+        order_db = 'desc' # Default order for calculated fields is handled in Python
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Always query for all active assets, sort by ID or requested DB column
+        query = f'''
+            SELECT a.*, o.name AS owner_name 
+            FROM assets a 
+            JOIN owners o ON a.owner_id = o.id 
+            WHERE a.activate = TRUE 
+            ORDER BY {sort_column} {order_db};
+        '''
+        cur.execute(query)
+        assets = cur.fetchall()
+        cur.close()
+    
+    except ConnectionError as e:
+        print(f"Index route DB error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load asset list.", 500
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+    rates = get_exchange_rates()
+
+
+    total_usd = 0
+    total_inr = 0
+
+
+    # 1. Calculate Converted Values
+    for asset in assets:
+        cur_currency = asset['currency']
+        try:
+            # Ensure safe conversion to float from database value (which might be Decimal or String)
+            value = float(asset['value']) 
+        except (TypeError, ValueError):
+            value = 0.00
+        
+        # Calculate USD value
+        if cur_currency == 'USD':
+            asset['value_usd'] = value
+        else:
+            rate_to_usd = rates.get(cur_currency, None)
+            if rate_to_usd and rate_to_usd != 0:
+                asset['value_usd'] = round(value / rate_to_usd, 2)
+            else:
+                asset['value_usd'] = 0.00 # Use 0.00 for calculation purposes
+                asset['value_usd_display'] = "N/A" # Use a separate key for display
+            
+        # Calculate INR value
+        if 'value_usd_display' not in asset:
+             asset['value_usd_display'] = round(asset['value_usd'], 2)
+             asset['value_inr'] = round(asset['value_usd'] * rates.get('INR', 83), 2)
+             total_usd += asset['value_usd']
+             total_inr += asset['value_inr']
+        else:
+            asset['value_inr'] = 0.00
+            asset['value_inr_display'] = "N/A" # Separate key for INR display
+
+
+    # 2. Python Sorting for Calculated Fields (value_usd)
+    if sort_by in python_sort_columns:
+        reverse_sort = order_db == 'desc'
+        
+        # For calculated values, sort by the numeric field
+        assets.sort(key=lambda a: a.get(sort_by, 0.00), reverse=reverse_sort)
+
+
+    total_usd = round(total_usd, 2)
+    total_inr = round(total_inr, 2)
+    
+    return render_template('index.html', assets=assets, total_usd=total_usd, total_inr=total_inr, sort_by=sort_by, order=order_db)
+
+
+# --- ADD ASSET ROUTE ---
+@app.route('/add_asset', methods=['GET', 'POST'])
+@login_required # PROTECTED
+def add_asset():
+    """Displays form and handles submission for adding a new asset."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Add asset route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn is not None and request.method == 'GET':
+                conn.close()
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+
+        cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
+        asset_types = [row['type_name'] for row in cur.fetchall()]
+
+
+        cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
+        countries = [row['country_name'] for row in cur.fetchall()]
+
+
+        cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
+        currencies = [row['currency_code'] for row in cur.fetchall()]
+
+        # Re-fetch owners inside the try block for error propagation
+        owners = get_owners() 
+        
+        cur.close()
+        # conn.close() # Keep connection open if POST is coming next
+    
+    except ConnectionError as e:
+        print(f"Add asset config error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load form options.", 500
+    finally:
+        if conn is not None and request.method == 'GET':
+            conn.close()
+
+
+    if request.method == 'POST':
+        # Existing Fields
+        owner_id = request.form['owner_id']
+        type = request.form['type']
+        name = request.form['name']
+        country = request.form['country']
+        currency = request.form['currency']
+        
+        # FIX: Ensure 'value' is a float before inserting into the database
+        value_str = request.form['value']
+        try:
+            value = float(value_str)
+        except (ValueError, TypeError):
+            # If conversion fails (e.g., empty string, bad text), set to 0.00
+            value = 0.00 
+            
+        account_no = request.form['account_no']
+        notes = request.form['notes']
+        
+        # New Fields
+        financial_institution = request.form['financial_institution']
+        beneficiary_name = request.form['beneficiary_name']
+        policy_or_plan_type = request.form['policy_or_plan_type']
+        contact_phone = request.form['contact_phone']
+        document_location = request.form['document_location']
+        investment_strategy = request.form['investment_strategy']
+
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO assets (
+                    owner_id, type, name, country, currency, value, account_no, last_updated, notes, activate,
+                    financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, %s, TRUE,
+                    %s, %s, %s, %s, %s, %s
+                )
+            """, (
+                owner_id, type, name, country, currency, value, account_no, notes,
+                financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy
+            ))
+            conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Database insertion error in add_asset: {e}", file=sys.stderr)
+            return f"An error occurred during asset insertion: {e}", 500
+        finally:
+            if conn is not None:
+                cur.close()
+                conn.close()
+        return redirect('/')
+
+
+    return render_template('add_asset.html', asset_types=asset_types, countries=countries, currencies=currencies, owners=owners)
+
+
+# --- EDIT ASSET ROUTE (Updated for 6 new fields) ---
+@app.route('/edit_asset/<int:asset_id>', methods=['GET', 'POST'])
+@login_required # PROTECTED
+def edit_asset(asset_id):
+    """Displays form and handles submission for editing an existing asset."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
         conn_check = None
         try:
             conn_check = get_db_connection()
             cur_check = conn_check.cursor()
             cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
             is_approved_tuple = cur_check.fetchone()
-            if is_approved_tuple and is_approved_tuple['is_approved']:
-                is_approved = True
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
         except Exception as e:
-            print(f"Approval check failed: {e}", file=sys.stderr)
+            print(f"Edit asset route approval check failed: {e}", file=sys.stderr)
         finally:
             if conn_check is not None:
                 conn_check.close()
                 
-        if not is_approved:
-            return redirect(url_for('pending_approval'))
+    # Proceed with original logic...
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        return view(**kwargs)
-    return wrapped_view
 
-# --- ROUTES ---
+        cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
+        asset_types = [row['type_name'] for row in cur.fetchall()]
 
-@app.route('/')
-@login_required
-def index():
+
+        cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
+        countries = [row['country_name'] for row in cur.fetchall()]
+
+
+        cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
+        currencies = [row['currency_code'] for row in cur.fetchall()]
+
+
+        owners = get_owners() 
+        
+        # Fetch the asset to edit, regardless of request method
+        cur.execute('SELECT * FROM assets WHERE id=%s;', (asset_id,))
+        asset = cur.fetchone()
+
+        if asset is None:
+            return "Asset not found", 404
+
+    except ConnectionError as e:
+        print(f"Edit asset config error: {e}", file=sys.stderr)
+        return "Database Connection Error: Cannot load form options or asset.", 500
+    except Exception as e:
+        print(f"Edit asset initial fetch error: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None and request.method == 'GET':
+            cur.close()
+            conn.close()
+
+
+    if request.method == 'POST':
+        # Existing Fields
+        owner_id = request.form['owner_id']
+        type = request.form['type']
+        name = request.form['name']
+        country = request.form['country']
+        currency = request.form['currency']
+        
+        # FIX: Ensure 'value' is a float before inserting into the database
+        value_str = request.form['value']
+        try:
+            value = float(value_str)
+        except (ValueError, TypeError):
+            value = 0.00 
+            
+        account_no = request.form['account_no']
+        notes = request.form['notes']
+
+
+        # New Fields
+        financial_institution = request.form['financial_institution']
+        beneficiary_name = request.form['beneficiary_name']
+        policy_or_plan_type = request.form['policy_or_plan_type']
+        contact_phone = request.form['contact_phone']
+        document_location = request.form['document_location']
+        investment_strategy = request.form['investment_strategy']
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE assets
+                SET 
+                    owner_id=%s, type=%s, name=%s, country=%s, currency=%s, value=%s, account_no=%s, notes=%s, last_updated=CURRENT_DATE,
+                    financial_institution=%s, beneficiary_name=%s, policy_or_plan_type=%s, contact_phone=%s, document_location=%s, investment_strategy=%s
+                WHERE id=%s
+            """, (
+                owner_id, type, name, country, currency, value, account_no, notes,
+                financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy,
+                asset_id
+            ))
+            conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Database update error in edit_asset: {e}", file=sys.stderr)
+            return f"An error occurred during asset update: {e}", 500
+        finally:
+            if conn is not None:
+                cur.close()
+                conn.close()
+            
+        return redirect('/')
+
+    # GET request render
+    return render_template('edit_asset.html', asset=asset, asset_types=asset_types, countries=countries, currencies=currencies, owners=owners)
+
+
+@app.route('/delete_asset/<int:asset_id>', methods=['POST'])
+@login_required # PROTECTED
+def delete_asset(asset_id):
+    """Marks an asset as inactive (soft delete)."""
+    
+    # NEW CHECK: Reroute unapproved users
     user_id = session.get('user_id')
-    # CRITICAL FIX: Ensure group_id is an integer from session
-    group_id = session.get('group_id')
-    
-    if group_id is None:
-        # This should ideally not happen if login_required passed, but good safeguard
-        return redirect(url_for('login'))
-        
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # 1. Fetch Assets
+    if user_id:
+        conn_check = None
         try:
-            cur.execute('''
-                SELECT id, name, type, description, current_value, currency, notes, last_updated 
-                FROM assets 
-                WHERE group_id = %s AND active = TRUE
-                ORDER BY name;
-            ''', (group_id,))
-            assets = cur.fetchall()
-        except psycopg2.ProgrammingError as e:
-            if 'column "description" does not exist' in str(e) or 'column "current_value" does not exist' in str(e) or 'column "notes" does not exist' in str(e):
-                # We trap the specific error here to remind the user of the manual DB fix
-                print(f"Database Schema Mismatch Error: {e}", file=sys.stderr)
-                return "Error fetching assets: Database schema mismatch. Please ensure columns 'description', 'current_value', and 'notes' exist in the 'assets' table.", 500
-            elif 'invalid input syntax for type integer' in str(e):
-                # New Check: If group_id is not an integer
-                print(f"Data Type Error: group_id in session is not an integer. Value: {group_id}", file=sys.stderr)
-                return "Error fetching assets: group_id in session is not an integer. Log out and log back in to correct the session data.", 500
-            else:
-                raise # Re-raise other programming errors
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
         except Exception as e:
-            print(f"Error fetching assets: {e}", file=sys.stderr)
-            return f"Error fetching assets: {e}", 500
-
-
-        # 2. Fetch Expenses (last 30 days)
-        cur.execute('''
-            SELECT e.id, e.amount, e.description, e.date, c.name as category_name, u.username as user_name
-            FROM expenses e
-            JOIN categories c ON e.category_id = c.id
-            JOIN users u ON e.user_id = u.id
-            WHERE e.group_id = %s AND e.activate = TRUE AND e.date >= NOW() - INTERVAL '30 days'
-            ORDER BY e.date DESC, e.created_at DESC;
-        ''', (group_id,))
-        recent_expenses = cur.fetchall()
-
-        # 3. Calculate Expense Totals by Category for the month
-        cur.execute('''
-            SELECT c.name as category_name, SUM(e.amount) as total_spent
-            FROM expenses e
-            JOIN categories c ON e.category_id = c.id
-            WHERE e.group_id = %s 
-            AND e.activate = TRUE 
-            AND EXTRACT(YEAR FROM e.date) = EXTRACT(YEAR FROM CURRENT_DATE)
-            AND EXTRACT(MONTH FROM e.date) = EXTRACT(MONTH FROM CURRENT_DATE)
-            GROUP BY c.name
-            ORDER BY total_spent DESC;
-        ''', (group_id,))
-        category_totals = cur.fetchall()
-        
-        # 4. Fetch Budgets
-        cur.execute('''
-            SELECT b.monthly_limit, c.name as category_name
-            FROM budgets b
-            JOIN categories c ON b.category_id = c.id
-            WHERE b.group_id = %s AND b.active = TRUE;
-        ''', (group_id,))
-        budgets = cur.fetchall()
-
-        # 5. Fetch Savings Goals
-        cur.execute('''
-            SELECT id, name, target_amount, current_amount, target_date
-            FROM savings_goals
-            WHERE group_id = %s AND active = TRUE
-            ORDER BY target_date;
-        ''', (group_id,))
-        goals = cur.fetchall()
-
-        # Combine totals and budgets for dashboard display
-        budget_summary = {}
-        for b in budgets:
-            budget_summary[b['category_name']] = {'limit': b['monthly_limit'], 'spent': 0}
-            
-        for t in category_totals:
-            if t['category_name'] in budget_summary:
-                budget_summary[t['category_name']]['spent'] = t['total_spent']
-            else:
-                # Category exists but has no budget set
-                budget_summary[t['category_name']] = {'limit': None, 'spent': t['total_spent']}
-
-        # Calculate Net Worth (Assets - Debts)
-        net_worth = 0
-        for asset in assets:
-            if asset['type'] and 'Debt' in asset['type']:
-                net_worth -= asset['current_value']
-            else:
-                net_worth += asset['current_value']
-
-        return render_template('index.html', 
-                               assets=assets, 
-                               recent_expenses=recent_expenses,
-                               budget_summary=budget_summary,
-                               goals=goals,
-                               net_worth=net_worth)
-
-    except ConnectionError as e:
-        # ConnectionError is custom, handles missing DATABASE_URL or psycopg2 failure
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        # Catch-all for other unhandled exceptions
-        print(f"Error in index route: {e}", file=sys.stderr)
-        return f"An unexpected error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-# --- LOGIN/LOGOUT/APPROVAL ROUTES ---
-
-@app.route('/login', methods=('GET', 'POST'))
-def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        conn = None
-        error = None
-        
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            # Fetch user details including hashed password and group ID
-            cur.execute(
-                'SELECT id, hashed_password, group_id, is_approved FROM users WHERE username = %s;',
-                (username,)
-            )
-            user = cur.fetchone()
-
-            if user is None:
-                error = 'Incorrect username.'
-            elif not bcrypt.check_password_hash(user['hashed_password'], password):
-                error = 'Incorrect password.'
-            else:
-                # Login SUCCESS
-                session.clear()
-                session['user_id'] = user['id']
-                # *** CRITICAL FIX: Ensure the INTEGER group_id is stored ***
-                if user['group_id'] is not None:
-                    session['group_id'] = user['group_id']
-                else:
-                    # Handle case where user is registered but not yet assigned to a group (should be handled at registration)
-                    error = 'User not assigned to a group. Contact an admin.'
-                    
-                if error is None:
-                    # Check approval status immediately
-                    if user['is_approved']:
-                        return redirect(url_for('index'))
-                    else:
-                        return redirect(url_for('pending_approval'))
-
-        except ConnectionError:
-            error = "Database connection failed. Please try again later."
-        except Exception as e:
-            print(f"Login error: {e}", file=sys.stderr)
-            error = f"An unexpected error occurred during login: {e}"
+            print(f"Delete asset route approval check failed: {e}", file=sys.stderr)
         finally:
-            if conn is not None:
-                conn.close()
-
-        if error:
-            return render_template('login.html', error=error)
-
-    return render_template('login.html')
-
-
-@app.route('/register', methods=('GET', 'POST'))
-def register():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        group_name = request.form['group_name'] # User provides existing group name or new name
-
-        conn = None
-        error = None
-        
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            # 1. Check if username is already taken
-            cur.execute('SELECT id FROM users WHERE username = %s;', (username,))
-            if cur.fetchone() is not None:
-                error = f'User {username} is already registered.'
-
-            # 2. Check for existing group or create new one
-            group_id = None
-            cur.execute('SELECT id FROM groups WHERE name = %s;', (group_name,))
-            group_row = cur.fetchone()
-            
-            if group_row:
-                # Group exists, user is joining it. They will need admin approval.
-                group_id = group_row['id']
-                is_admin = False # Joining user is not admin
-                is_approved = False # Joining user needs approval
-            else:
-                # Group does not exist, user is creating a new one and is the admin.
-                cur.execute('INSERT INTO groups (name) VALUES (%s) RETURNING id;', (group_name,))
-                group_id = cur.fetchone()['id']
-                is_admin = True
-                is_approved = True # Admin is automatically approved
-
-            # 3. Hash password and insert user
-            hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-            
-            if group_id is not None:
-                cur.execute(
-                    '''
-                    INSERT INTO users (username, hashed_password, group_id, is_admin, is_approved) 
-                    VALUES (%s, %s, %s, %s, %s) 
-                    RETURNING id;
-                    ''',
-                    (username, hashed_password, group_id, is_admin, is_approved)
-                )
-                user_id = cur.fetchone()['id']
-                
-                # 4. If new group, update group's admin_user_id
-                if is_admin:
-                    cur.execute(
-                        'UPDATE groups SET admin_user_id = %s WHERE id = %s;',
-                        (user_id, group_id)
-                    )
-                    
-                conn.commit()
-                
-                # Registration Success - Set session and redirect
-                session.clear()
-                session['user_id'] = user_id
-                # *** CRITICAL FIX: Ensure the INTEGER group_id is stored ***
-                session['group_id'] = group_id
-                
-                if is_approved:
-                    return redirect(url_for('index'))
-                else:
-                    return redirect(url_for('pending_approval'))
-
-        except psycopg2.IntegrityError as e:
-            conn.rollback()
-            if 'duplicate key value violates unique constraint' in str(e):
-                error = 'A user with that username already exists.'
-            else:
-                error = 'An integrity error occurred. Please check your inputs.'
-        except ConnectionError:
-            error = "Database connection failed. Please try again later."
-        except Exception as e:
-            conn.rollback()
-            print(f"Registration error: {e}", file=sys.stderr)
-            error = f"An unexpected error occurred during registration: {e}"
-        finally:
-            if conn is not None:
-                conn.close()
-
-        return render_template('register.html', error=error)
-
-# ... (other routes follow)
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-@app.route('/pending_approval')
-def pending_approval():
-    return render_template('pending_approval.html')
-
-
-@app.route('/categories')
-@login_required
-def categories():
-    group_id = session.get('group_id')
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute('SELECT id, name FROM categories WHERE group_id = %s ORDER BY name;', (group_id,))
-        categories = cur.fetchall()
-        return render_template('categories.html', categories=categories)
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        print(f"Error fetching categories: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/add_category', methods=['POST'])
-@login_required
-def add_category():
-    group_id = session.get('group_id')
-    category_name = request.form['name'].strip()
+            if conn_check is not None:
+                conn_check.close()
     
-    if not category_name:
-        return redirect(url_for('categories'))
-        
+    # Proceed with original logic...
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('INSERT INTO categories (group_id, name) VALUES (%s, %s);', (group_id, category_name))
+        cur.execute('UPDATE assets SET activate = FALSE WHERE id = %s;', (asset_id,))
         conn.commit()
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        # Handle case where category name is not unique within the group
-        return render_template('categories.html', categories=[], error=f"Category '{category_name}' already exists in your group."), 400
     except ConnectionError as e:
         return f"Database Connection Error: {e}", 500
     except Exception as e:
-        conn.rollback()
-        print(f"Error adding category: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
+        if conn: conn.rollback()
+        print(f"Database error on delete: {e}", file=sys.stderr)
+        return f"An error occurred during deletion: {e}", 500
     finally:
         if conn is not None:
+            cur.close()
             conn.close()
-            
-    return redirect(url_for('categories'))
+    return redirect('/')
 
-@app.route('/delete_category/<int:category_id>', methods=['POST'])
-@login_required
-def delete_category(category_id):
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Check if the category is used in any active expense or budget
-        cur.execute('SELECT id FROM expenses WHERE category_id = %s AND activate = TRUE LIMIT 1;', (category_id,))
-        if cur.fetchone():
-            return render_template('categories.html', categories=[], error="Cannot delete category: It is currently used in active expenses. Please re-assign expenses first."), 400
 
-        cur.execute('SELECT id FROM budgets WHERE category_id = %s AND active = TRUE LIMIT 1;', (category_id,))
-        if cur.fetchone():
-             return render_template('categories.html', categories=[], error="Cannot delete category: It is currently used in an active budget."), 400
-             
-        # Delete the category
-        cur.execute('DELETE FROM categories WHERE id = %s;', (category_id,))
-        conn.commit()
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error deleting category: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('categories'))
-
+# --- EXPENSES ROUTES (All Updated) ---
 @app.route('/expenses')
-@login_required
+@login_required # PROTECTED
 def expenses():
-    group_id = session.get('group_id')
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # Fetch all active expenses for the group
-        cur.execute('''
-            SELECT 
-                e.id, 
-                e.amount, 
-                e.description, 
-                e.date, 
-                c.name as category_name, 
-                u.username as user_name
-            FROM expenses e
-            JOIN categories c ON e.category_id = c.id
-            JOIN users u ON e.user_id = u.id
-            WHERE e.group_id = %s AND e.activate = TRUE
-            ORDER BY e.date DESC, e.created_at DESC;
-        ''', (group_id,))
-        all_expenses = cur.fetchall()
-
-        # Fetch categories and users for the form
-        cur.execute('SELECT id, name FROM categories WHERE group_id = %s ORDER BY name;', (group_id,))
-        categories = cur.fetchall()
-        
-        # Only fetch users who are part of the current group
-        cur.execute('SELECT id, username FROM users WHERE group_id = %s AND is_approved = TRUE ORDER BY username;', (group_id,))
-        users = cur.fetchall()
-
-        return render_template('expenses.html', 
-                               all_expenses=all_expenses, 
-                               categories=categories,
-                               users=users)
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        print(f"Error fetching expenses data: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/add_expense', methods=['POST'])
-@login_required
-def add_expense():
-    group_id = session.get('group_id')
-    user_id = session.get('user_id') # Current logged in user is the default expense creator
-
-    try:
-        amount = float(request.form['amount'])
-        description = request.form['description'].strip()
-        date = request.form['date']
-        category_id = request.form['category_id']
-        
-        # Optional: allow the user to submit an expense on behalf of another user in the group
-        expense_user_id = request.form.get('expense_user_id', user_id) 
-
-    except ValueError:
-        return "Invalid amount or data format.", 400
+    """Lists all active expenses with sorting."""
     
-    if amount <= 0:
-        return "Amount must be positive.", 400
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Expenses route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+    
+    # Proceed with original logic...
+    sort_by = request.args.get('sort_by', 'expense_date')
+    order = request.args.get('order', 'desc')
+
+
+    allowed_sort_columns = ['id', 'description', 'category', 'amount', 'currency', 'expense_date', 'owner_name']
+    if sort_by not in allowed_sort_columns:
+        sort_by = 'expense_date'
+    order = 'asc' if order.lower() == 'asc' else 'desc'
+
+
+    sort_column = 'o.name' if sort_by == 'owner_name' else f'e.{sort_by}'
+
 
     conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute(
-            '''
-            INSERT INTO expenses (group_id, user_id, amount, description, date, category_id)
-            VALUES (%s, %s, %s, %s, %s, %s);
-            ''',
-            (group_id, expense_user_id, amount, description, date, category_id)
-        )
-        conn.commit()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        query = f'''
+            SELECT e.*, o.name AS owner_name
+            FROM expenses e
+            JOIN owners o ON e.owner_id = o.id
+            WHERE e.activate = TRUE 
+            ORDER BY {sort_column} {order};
+        '''
+        cur.execute(query)
+        expenses = cur.fetchall()
+        cur.close()
     except ConnectionError as e:
         return f"Database Connection Error: {e}", 500
     except Exception as e:
-        conn.rollback()
-        print(f"Error adding expense: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
+        print(f"Expense list fetch error: {e}", file=sys.stderr)
+        return f"An error occurred fetching expenses: {e}", 500
     finally:
         if conn is not None:
             conn.close()
+
+
+    return render_template('expenses.html', expenses=expenses, sort_by=sort_by, order=order)
+
+
+@app.route('/add_expense', methods=['GET', 'POST'])
+@login_required # PROTECTED
+def add_expense():
+    """Displays form and handles submission for adding a new expense."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Add expense route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+    
+    # Proceed with original logic...
+    categories = ['Travel', 'Office Supplies', 'Utilities', 'Salary', 'Miscellaneous']
+    currencies = ['USD', 'INR', 'EUR', 'GBP', 'JPY']
+    
+    owners = get_owners()
+
+
+    if request.method == 'POST':
+        owner_id = request.form['owner_id']
+        description = request.form['description']
+        category = request.form['category']
+        
+        # Ensure 'amount' is a safe number
+        amount_str = request.form['amount']
+        try:
+            amount = float(amount_str)
+        except (ValueError, TypeError):
+            amount = 0.00
             
-    return redirect(url_for('expenses'))
+        currency = request.form['currency']
+        expense_date = request.form['expense_date']
+        notes = request.form['notes']
+
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO expenses (owner_id, description, category, amount, currency, expense_date, notes, activate)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+            """, (owner_id, description, category, amount, currency, expense_date, notes))
+            conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Expense insertion error: {e}", file=sys.stderr)
+            return f"An error occurred inserting expense: {e}", 500
+        finally:
+            if conn is not None:
+                cur.close()
+                conn.close()
+        return redirect('/expenses')
+
+
+    return render_template('add_expense.html', categories=categories, currencies=currencies, owners=owners)
+
+
+@app.route('/edit_expense/<int:expense_id>', methods=['GET', 'POST'])
+@login_required # PROTECTED
+def edit_expense(expense_id):
+    """Displays form and handles submission for editing an existing expense."""
+    
+    # NEW CHECK: Reroute unapproved users
+    user_id = session.get('user_id')
+    if user_id:
+        conn_check = None
+        try:
+            conn_check = get_db_connection()
+            cur_check = conn_check.cursor()
+            cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
+            is_approved_tuple = cur_check.fetchone()
+            if not is_approved_tuple or not is_approved_tuple[0]: 
+                return redirect(url_for('pending_approval'))
+        except Exception as e:
+            print(f"Edit expense route approval check failed: {e}", file=sys.stderr)
+        finally:
+            if conn_check is not None:
+                conn_check.close()
+                
+    # Proceed with original logic...
+    categories = ['Travel', 'Office Supplies', 'Utilities', 'Salary', 'Miscellaneous']
+    currencies = ['USD', 'INR', 'EUR', 'GBP', 'JPY']
+    
+    conn = None
+    owners = get_owners() 
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch expense for GET/initial check
+        cur.execute('SELECT * FROM expenses WHERE id=%s;', (expense_id,))
+        expense = cur.fetchone()
+        
+        if expense is None:
+            return "Expense not found", 404
+
+    except ConnectionError as e:
+        return f"Database Connection Error: {e}", 500
+    except Exception as e:
+        print(f"Expense fetch error: {e}", file=sys.stderr)
+        return f"An error occurred: {e}", 500
+    finally:
+        if conn is not None and request.method == 'GET':
+            cur.close()
+            conn.close()
+
+    if request.method == 'POST':
+        owner_id = request.form['owner_id']
+        description = request.form['description']
+        category = request.form['category']
+        
+        # Ensure 'amount' is a safe number
+        amount_str = request.form['amount']
+        try:
+            amount = float(amount_str)
+        except (ValueError, TypeError):
+            amount = 0.00
+            
+        currency = request.form['currency']
+        expense_date = request.form['expense_date']
+        notes = request.form['notes']
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE expenses
+                SET owner_id=%s, description=%s, category=%s, amount=%s, currency=%s, expense_date=%s, notes=%s
+                WHERE id=%s
+            """, (owner_id, description, category, amount, currency, expense_date, notes, expense_id))
+            
+            conn.commit()
+        except ConnectionError as e:
+            return f"Database Connection Error: {e}", 500
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Expense update error: {e}", file=sys.stderr)
+            return f"An error occurred updating expense: {e}", 500
+        finally:
+            if conn is not None:
+                cur.close()
+                conn.close()
+        return redirect('/expenses')
+
+
+    # GET request render
+    return render_template(
+        'edit_expense.html', 
+        expense=expense, 
+        categories=categories, 
+        currencies=currencies, 
+        owners=owners
+    )
 
 
 @app.route('/delete_expense/<int:expense_id>', methods=['POST'])
-@login_required
+@login_required # PROTECTED
 def delete_expense(expense_id):
     """Marks an expense as inactive (soft delete)."""
     
@@ -584,7 +1057,7 @@ def delete_expense(expense_id):
             cur_check = conn_check.cursor()
             cur_check.execute('SELECT is_approved FROM users WHERE id = %s;', (user_id,))
             is_approved_tuple = cur_check.fetchone()
-            if not is_approved_tuple or not is_approved_tuple['is_approved']: 
+            if not is_approved_tuple or not is_approved_tuple[0]: 
                 return redirect(url_for('pending_approval'))
         except Exception as e:
             print(f"Delete expense route approval check failed: {e}", file=sys.stderr)
@@ -607,525 +1080,11 @@ def delete_expense(expense_id):
         return f"An error occurred deleting expense: {e}", 500
     finally:
         if conn is not None:
+            cur.close()
             conn.close()
-            
-    return redirect(url_for('expenses'))
+    return redirect('/expenses')
 
 
-@app.route('/budgets')
-@login_required
-def budgets():
-    group_id = session.get('group_id')
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # 1. Fetch active budgets with category names
-        cur.execute('''
-            SELECT b.id, b.monthly_limit, c.name as category_name
-            FROM budgets b
-            JOIN categories c ON b.category_id = c.id
-            WHERE b.group_id = %s AND b.active = TRUE
-            ORDER BY c.name;
-        ''', (group_id,))
-        active_budgets = cur.fetchall()
-        
-        # 2. Fetch categories that DO NOT currently have an active budget for the form
-        cur.execute('''
-            SELECT c.id, c.name
-            FROM categories c
-            LEFT JOIN budgets b ON c.id = b.category_id AND b.group_id = %s AND b.active = TRUE
-            WHERE c.group_id = %s AND b.id IS NULL
-            ORDER BY c.name;
-        ''', (group_id, group_id))
-        available_categories = cur.fetchall()
-
-        return render_template('budgets.html', 
-                               active_budgets=active_budgets, 
-                               available_categories=available_categories)
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        print(f"Error fetching budgets data: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/add_budget', methods=['POST'])
-@login_required
-def add_budget():
-    group_id = session.get('group_id')
-    
-    try:
-        category_id = request.form['category_id']
-        monthly_limit = float(request.form['monthly_limit'])
-    except ValueError:
-        return "Invalid amount or data format.", 400
-    
-    if monthly_limit <= 0:
-        return "Budget limit must be positive.", 400
-        
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # Insert new budget (assuming active=TRUE and start_date=CURRENT_DATE)
-        cur.execute(
-            '''
-            INSERT INTO budgets (group_id, category_id, monthly_limit, start_date, active)
-            VALUES (%s, %s, %s, CURRENT_DATE, TRUE);
-            ''',
-            (group_id, category_id, monthly_limit)
-        )
-        conn.commit()
-
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        return "A budget already exists for this category.", 400
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error adding budget: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('budgets'))
-
-
-@app.route('/delete_budget/<int:budget_id>', methods=['POST'])
-@login_required
-def delete_budget(budget_id):
-    """Deactivates a budget (soft delete)."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Simply mark as inactive instead of deleting permanently
-        cur.execute('UPDATE budgets SET active = FALSE WHERE id = %s;', (budget_id,))
-        conn.commit()
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error deleting budget: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('budgets'))
-
-# --- ASSETS ROUTES ---
-
-@app.route('/assets')
-@login_required
-def assets():
-    group_id = session.get('group_id')
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # Fetch all active assets for the group
-        # NOTE: This is the query that threw the error. It needs the integer group_id.
-        cur.execute('''
-            SELECT id, name, type, description, current_value, currency, notes, last_updated 
-            FROM assets 
-            WHERE group_id = %s AND active = TRUE
-            ORDER BY name;
-        ''', (group_id,))
-        all_assets = cur.fetchall()
-
-        # Define asset types for the form/template
-        asset_types = ['Checking', 'Savings', 'Investment', 'Cash', 'Debt (Credit Card)', 'Debt (Loan)', 'Other']
-
-        return render_template('assets.html', 
-                               all_assets=all_assets,
-                               asset_types=asset_types)
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        # Check for the specific error to provide a more helpful message
-        if 'invalid input syntax for type integer' in str(e):
-             print(f"Data Type Error: group_id in session is not an integer. Value: {session.get('group_id')}", file=sys.stderr)
-             return "Error fetching assets: group_id in session is not an integer. Log out and log back in to correct the session data.", 500
-
-        print(f"Error fetching assets data: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/add_asset', methods=['POST'])
-@login_required
-def add_asset():
-    group_id = session.get('group_id')
-    
-    try:
-        name = request.form['name'].strip()
-        asset_type = request.form['type'].strip()
-        current_value = float(request.form['current_value'])
-        description = request.form.get('description', '').strip()
-        notes = request.form.get('notes', '').strip()
-        currency = request.form.get('currency', 'USD').strip()
-    except ValueError:
-        return "Invalid current value format.", 400
-    
-    if not name or not asset_type:
-        return "Asset name and type are required.", 400
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute(
-            '''
-            INSERT INTO assets (group_id, name, type, description, current_value, notes, currency)
-            VALUES (%s, %s, %s, %s, %s, %s, %s);
-            ''',
-            (group_id, name, asset_type, description, current_value, notes, currency)
-        )
-        conn.commit()
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        return "An asset with that name already exists in your group.", 400
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error adding asset: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('assets'))
-
-
-@app.route('/update_asset_value/<int:asset_id>', methods=['POST'])
-@login_required
-def update_asset_value(asset_id):
-    group_id = session.get('group_id')
-    
-    try:
-        new_value = float(request.form['new_value'])
-    except ValueError:
-        return "Invalid value format.", 400
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Ensure the asset belongs to the user's group before updating
-        cur.execute('SELECT id FROM assets WHERE id = %s AND group_id = %s;', (asset_id, group_id))
-        if cur.fetchone() is None:
-            return "Asset not found or unauthorized.", 403
-            
-        cur.execute(
-            '''
-            UPDATE assets SET current_value = %s, last_updated = CURRENT_TIMESTAMP
-            WHERE id = %s;
-            ''',
-            (new_value, asset_id)
-        )
-        conn.commit()
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error updating asset value: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('assets'))
-
-
-@app.route('/delete_asset/<int:asset_id>', methods=['POST'])
-@login_required
-def delete_asset(asset_id):
-    """Marks an asset as inactive (soft delete)."""
-    group_id = session.get('group_id')
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Ensure the asset belongs to the user's group before deleting
-        cur.execute('SELECT id FROM assets WHERE id = %s AND group_id = %s;', (asset_id, group_id))
-        if cur.fetchone() is None:
-            return "Asset not found or unauthorized.", 403
-            
-        cur.execute(
-            '''
-            UPDATE assets SET active = FALSE
-            WHERE id = %s;
-            ''',
-            (asset_id,)
-        )
-        conn.commit()
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error deleting asset: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('assets'))
-
-
-# --- SAVINGS GOALS ROUTES ---
-
-@app.route('/goals')
-@login_required
-def goals():
-    group_id = session.get('group_id')
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # Fetch all active savings goals for the group
-        cur.execute('''
-            SELECT id, name, target_amount, current_amount, target_date
-            FROM savings_goals
-            WHERE group_id = %s AND active = TRUE
-            ORDER BY target_date;
-        ''', (group_id,))
-        all_goals = cur.fetchall()
-
-        return render_template('goals.html', 
-                               all_goals=all_goals)
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        print(f"Error fetching goals data: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/add_goal', methods=['POST'])
-@login_required
-def add_goal():
-    group_id = session.get('group_id')
-    
-    try:
-        name = request.form['name'].strip()
-        target_amount = float(request.form['target_amount'])
-        target_date = request.form['target_date']
-        # Current amount can be optional, default to 0.00
-        current_amount = float(request.form.get('current_amount', 0.00)) 
-    except ValueError:
-        return "Invalid amount or data format.", 400
-    
-    if target_amount <= 0:
-        return "Target amount must be positive.", 400
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute(
-            '''
-            INSERT INTO savings_goals (group_id, name, target_amount, current_amount, target_date)
-            VALUES (%s, %s, %s, %s, %s);
-            ''',
-            (group_id, name, target_amount, current_amount, target_date)
-        )
-        conn.commit()
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        return "A goal with that name already exists in your group.", 400
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error adding goal: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('goals'))
-
-
-@app.route('/update_goal_amount/<int:goal_id>', methods=['POST'])
-@login_required
-def update_goal_amount(goal_id):
-    group_id = session.get('group_id')
-    
-    try:
-        # Use 'add_amount' to incrementally update the goal
-        add_amount = float(request.form['add_amount'])
-    except ValueError:
-        return "Invalid amount format.", 400
-        
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Ensure the goal belongs to the user's group before updating
-        cur.execute('SELECT id FROM savings_goals WHERE id = %s AND group_id = %s;', (goal_id, group_id))
-        if cur.fetchone() is None:
-            return "Goal not found or unauthorized.", 403
-            
-        # Update the current_amount by adding the new contribution
-        cur.execute(
-            '''
-            UPDATE savings_goals 
-            SET current_amount = current_amount + %s
-            WHERE id = %s;
-            ''',
-            (add_amount, goal_id)
-        )
-        conn.commit()
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error updating goal amount: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('goals'))
-
-
-@app.route('/delete_goal/<int:goal_id>', methods=['POST'])
-@login_required
-def delete_goal(goal_id):
-    """Marks a goal as inactive (soft delete)."""
-    group_id = session.get('group_id')
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Ensure the goal belongs to the user's group before deleting
-        cur.execute('SELECT id FROM savings_goals WHERE id = %s AND group_id = %s;', (goal_id, group_id))
-        if cur.fetchone() is None:
-            return "Goal not found or unauthorized.", 403
-            
-        cur.execute(
-            '''
-            UPDATE savings_goals SET active = FALSE
-            WHERE id = %s;
-            ''',
-            (goal_id,)
-        )
-        conn.commit()
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error deleting goal: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('goals'))
-
-# --- USER MANAGEMENT ROUTES ---
-
-@app.route('/admin/users')
-@login_required
-def admin_users():
-    group_id = session.get('group_id')
-    user_id = session.get('user_id')
-    
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # 1. Check if the current user is an admin
-        cur.execute('SELECT is_admin FROM users WHERE id = %s AND group_id = %s;', (user_id, group_id))
-        user_row = cur.fetchone()
-        if not user_row or not user_row['is_admin']:
-            return "Access Denied: You must be an administrator to view this page.", 403
-            
-        # 2. Fetch all users in the group
-        cur.execute('''
-            SELECT id, username, is_admin, is_approved 
-            FROM users 
-            WHERE group_id = %s 
-            ORDER BY is_approved DESC, username;
-        ''', (group_id,))
-        users = cur.fetchall()
-
-        return render_template('admin_users.html', users=users)
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        print(f"Error fetching admin user data: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/admin/approve_user/<int:user_to_approve_id>', methods=['POST'])
-@login_required
-def approve_user(user_to_approve_id):
-    group_id = session.get('group_id')
-    admin_user_id = session.get('user_id')
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Security check: Must be an admin AND the target user must be in the same group
-        cur.execute('SELECT is_admin FROM users WHERE id = %s AND group_id = %s;', (admin_user_id, group_id))
-        admin_row = cur.fetchone()
-        
-        if not admin_row or not admin_row['is_admin']:
-            return "Access Denied: Not an administrator.", 403
-            
-        # Perform the approval
-        cur.execute(
-            'UPDATE users SET is_approved = TRUE WHERE id = %s AND group_id = %s;',
-            (user_to_approve_id, group_id)
-        )
-        conn.commit()
-        
-    except ConnectionError as e:
-        return f"Database Connection Error: {e}", 500
-    except Exception as e:
-        conn.rollback()
-        print(f"Error approving user: {e}", file=sys.stderr)
-        return f"An error occurred: {e}", 500
-    finally:
-        if conn is not None:
-            conn.close()
-            
-    return redirect(url_for('admin_users'))
-
-# --- MAIN RUN BLOCK ---
 
 if __name__ == '__main__':
-    # This is useful for debugging locally, but the production environment (Render) 
-    # will handle the running of the application.
     app.run(debug=True)

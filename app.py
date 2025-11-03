@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, g
+from flask import Flask, render_template, request, redirect, url_for, session, g, flash
 from flask_bcrypt import Bcrypt
 from collections import Counter
 import psycopg2
@@ -8,6 +8,7 @@ import functools # For the login_required decorator
 import os # To read environment variables securely
 import sys # For logging critical errors
 from datetime import datetime
+import uuid # For generating unique group IDs
 
 # --- APPLICATION INITIALIZATION ---
 app = Flask(__name__)
@@ -19,8 +20,8 @@ bcrypt = Bcrypt(app)
 # ------------------------------
 
 # --- GLOBAL CONSTANTS ---
-# This ID must match the default one used in the SQL migration scripts.
-DEFAULT_GROUP_ID = 'default-family'
+# This ID is only for temporary/unassigned users. Real groups get a unique ID.
+DEFAULT_GROUP_ID = 'unassigned-default-group' 
 BASE_CURRENCY = 'USD' # Currency for all exchange rate lookups
 
 # -----------------------------------------------------------
@@ -44,7 +45,6 @@ class ConnectionError(Exception):
 def get_db_connection():
     """Establishes a connection to the PostgreSQL database."""
     if not DATABASE_URL:
-        # Critical error if DSN is missing
         print("CRITICAL ERROR: DATABASE_URL environment variable is not set.", file=sys.stderr)
         raise ConnectionError("Database URL is not configured.")
         
@@ -61,10 +61,8 @@ def get_exchange_rates():
     
     if not key:
         print("WARNING: EXCHANGE_RATE_API_KEY environment variable is not set.", file=sys.stderr)
-        # Return a fallback with only the base currency
         return {BASE_CURRENCY: 1.0}
     
-    # Using ExchangeRate-API (free tier allows USD as base)
     url = f'https://v6.exchangerate-api.com/v6/{key}/latest/{BASE_CURRENCY}'
     try:
         response = requests.get(url, timeout=5)
@@ -81,6 +79,12 @@ def get_exchange_rates():
         print(f"Error fetching exchange rates: {e}", file=sys.stderr)
         return {BASE_CURRENCY: 1.0}
         
+def generate_unique_group_id():
+    """Generates a simple, unique group identifier."""
+    # Use a small part of a UUID to keep it short and unique
+    short_uuid = uuid.uuid4().hex[:6] 
+    return f"family-{short_uuid}"
+
 # --- AUTHENTICATION & MULTI-TENANCY DECORATOR ---
 
 def login_required(view):
@@ -93,16 +97,14 @@ def login_required(view):
         user_id = session.get('user_id')
         
         if user_id is None:
-            # User not logged in, redirect to login page
             return redirect(url_for('login'))
         
-        # Load user data and check approval status
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
             
-            # CRITICAL: Fetch is_approved AND group_id from public.users
+            # Fetch is_approved and group_id from public.users
             cur.execute("""
                 SELECT id, username, is_approved, group_id 
                 FROM public.users 
@@ -111,33 +113,30 @@ def login_required(view):
             user = cur.fetchone()
             
             if user is None:
-                # User exists in session but not in DB (deleted?)
                 session.clear()
                 return redirect(url_for('login'))
 
-            # Store user data for easy access in views
             g.user_id = user['id']
             g.username = user['username']
             g.is_approved = user['is_approved']
             # CRITICAL: Store group_id for multi-tenancy filtering
             g.group_id = user['group_id']
             
-            # Check for approval status
             if not g.is_approved:
-                # Approved status must be checked first before proceeding to any main app routes
                 return redirect(url_for('pending_approval'))
                 
         except ConnectionError:
-             return "Database connection failed during user load.", 500
+             flash("Database connection failed during user load.", 'error')
+             return redirect(url_for('login'))
         except Exception as e:
             print(f"Database error during user load: {e}", file=sys.stderr)
-            session.clear() # Clear session just in case of corruption
-            return "An internal error occurred.", 500
+            session.clear() 
+            flash("An internal error occurred.", 'error')
+            return redirect(url_for('login'))
         finally:
             if conn:
                 conn.close()
 
-        # If logged in and approved, proceed to the requested view function
         return view(**kwargs)
     return wrapped_view
 
@@ -152,6 +151,11 @@ def index():
     conn = None
     assets = []
     
+    # Check if the user is still in the temporary group
+    if g.group_id == DEFAULT_GROUP_ID:
+        flash("Welcome! Please create or join a family group to start tracking assets.", 'warning')
+        return redirect(url_for('group_management'))
+
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -168,15 +172,16 @@ def index():
         assets = cur.fetchall()
         
     except ConnectionError:
-        return "Database connection failed.", 500
+        flash("Database connection failed.", 'error')
+        return redirect(url_for('logout'))
     except Exception as e:
         print(f"Error fetching assets: {e}", file=sys.stderr)
-        return "An internal error occurred while fetching assets.", 500
+        flash("An internal error occurred while fetching assets.", 'error')
+        return redirect(url_for('logout'))
     finally:
         if conn:
             conn.close()
             
-    # Load exchange rates once for display conversion, if needed (logic not fully implemented here)
     rates = get_exchange_rates()
 
     return render_template('index.html', assets=assets, rates=rates)
@@ -197,20 +202,15 @@ def login():
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
             
-            # Fetch group_id along with other user data from public.users
             cur.execute("SELECT id, password_hash, is_approved, group_id FROM public.users WHERE username = %s;", (username,))
             user = cur.fetchone()
             
-            if user is None:
-                error = 'Incorrect username or password.'
-            elif not bcrypt.check_password_hash(user['password_hash'], password):
+            if user is None or not bcrypt.check_password_hash(user['password_hash'], password):
                 error = 'Incorrect username or password.'
             else:
                 session['user_id'] = user['id']
-                # CRITICAL: Store group_id in session upon successful login
                 session['group_id'] = user['group_id'] 
                 
-                # Check approval status immediately after login
                 if not user['is_approved']:
                     return redirect(url_for('pending_approval'))
                     
@@ -229,7 +229,9 @@ def login():
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """Handles new user registration."""
+    """
+    Handles new user registration. Users can optionally join a group immediately.
+    """
     if session.get('user_id'):
         return redirect(url_for('index'))
         
@@ -237,6 +239,8 @@ def register():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
+        # User can optionally provide a group ID to join upon registration
+        desired_group_id = request.form.get('group_id', '').strip()
         
         if not username or not password:
             error = 'Username and password are required.'
@@ -253,13 +257,26 @@ def register():
                 if cur.fetchone() is not None:
                     error = f"User {username} is already registered."
                 else:
-                    # CRITICAL: Assign the DEFAULT_GROUP_ID to the new user in public.users
+                    final_group_id = DEFAULT_GROUP_ID
+                    
+                    if desired_group_id:
+                        # If a group ID is provided, check if it exists (i.e., if anyone is in it)
+                        cur.execute("SELECT group_id FROM public.users WHERE group_id = %s LIMIT 1;", (desired_group_id,))
+                        if cur.fetchone():
+                            final_group_id = desired_group_id
+                        else:
+                            error = f"The Group ID '{desired_group_id}' does not exist. Please register without a Group ID and join later, or check your code."
+                            conn.close() # Close connection to abort registration
+                            return render_template('register.html', error=error, group_id=desired_group_id)
+
+                    # Assign the calculated group ID to the new user in public.users
                     cur.execute("""
                         INSERT INTO public.users (username, password_hash, is_approved, group_id)
                         VALUES (%s, %s, FALSE, %s);
-                    """, (username, password_hash, DEFAULT_GROUP_ID))
+                    """, (username, password_hash, final_group_id))
                     
                     conn.commit()
+                    flash('Registration successful! Please wait for admin approval.', 'success')
                     return redirect(url_for('login'))
                     
             except ConnectionError:
@@ -287,7 +304,6 @@ def pending_approval():
     if not user_id:
         return redirect(url_for('login'))
         
-    # Check if the user is suddenly approved (in case of race condition)
     conn = None
     try:
         conn = get_db_connection()
@@ -307,6 +323,110 @@ def pending_approval():
 
     return render_template('pending_approval.html')
 
+
+# --- GROUP MANAGEMENT ROUTES ---
+
+@app.route('/group_management')
+@login_required
+def group_management():
+    """
+    View for the user to see their current group ID and options to create/join a new one.
+    """
+    # g.username and g.group_id are guaranteed to exist by login_required
+    return render_template('group_management.html', 
+                           group_id=g.group_id, 
+                           username=g.username,
+                           is_default_group=(g.group_id == DEFAULT_GROUP_ID))
+
+@app.route('/create_group', methods=['POST'])
+@login_required
+def create_group():
+    """
+    Creates a new unique group ID and updates the current user's group_id.
+    """
+    conn = None
+    new_group_id = generate_unique_group_id()
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Update the user's group_id in public.users
+        cur.execute("""
+            UPDATE public.users SET group_id = %s WHERE id = %s;
+        """, (new_group_id, g.user_id))
+
+        conn.commit()
+        
+        # 2. Update the session/g object with the new group ID
+        session['group_id'] = new_group_id
+        g.group_id = new_group_id
+        
+        flash(f"Successfully created and joined a new group: {new_group_id}. Share this ID!", 'success')
+        return redirect(url_for('group_management'))
+        
+    except ConnectionError:
+        flash("Database connection failed during group creation.", 'error')
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"Error creating group: {e}", file=sys.stderr)
+        flash("An unexpected error occurred during group creation.", 'error')
+    finally:
+        if conn:
+            conn.close()
+            
+    return redirect(url_for('group_management'))
+    
+@app.route('/join_group', methods=['POST'])
+@login_required
+def join_group():
+    """
+    Allows a user (typically from the default group) to join an existing group.
+    """
+    target_group_id = request.form.get('target_group_id', '').strip()
+    
+    if not target_group_id:
+        flash("You must enter a Group ID to join.", 'error')
+        return redirect(url_for('group_management'))
+        
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 1. Check if the target_group_id actually exists in public.users (i.e., someone is in it)
+        cur.execute("SELECT group_id FROM public.users WHERE group_id = %s LIMIT 1;", (target_group_id,))
+        if cur.fetchone() is None:
+            flash(f"Group ID '{target_group_id}' does not exist or has no members.", 'error')
+            return redirect(url_for('group_management'))
+            
+        # 2. Update the current user's group_id
+        cur.execute("""
+            UPDATE public.users SET group_id = %s WHERE id = %s;
+        """, (target_group_id, g.user_id))
+
+        conn.commit()
+        
+        # 3. Update the session/g object
+        session['group_id'] = target_group_id
+        g.group_id = target_group_id
+        
+        flash(f"Successfully joined group: {target_group_id}.", 'success')
+        return redirect(url_for('index'))
+        
+    except ConnectionError:
+        flash("Database connection failed during group joining.", 'error')
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"Error joining group: {e}", file=sys.stderr)
+        flash("An unexpected error occurred while trying to join the group.", 'error')
+    finally:
+        if conn:
+            conn.close()
+            
+    return redirect(url_for('group_management'))
+
+# --- ASSET/EXPENSE ROUTES (Unchanged, rely on login_required for isolation) ---
 
 @app.route('/api/assets/<int:asset_id>')
 @login_required
@@ -335,7 +455,6 @@ def view_asset_details(asset_id):
             return "Asset not found or access denied.", 404
 
         # 2. Fetch Associated Expenses (Assuming public.expenses is linked via asset_id)
-        # Note: Best practice is to have group_id on public.expenses too, but for now we rely on the asset filter.
         cur.execute("""
             SELECT id, amount, category, date, description, activate
             FROM public.expenses 
@@ -426,7 +545,6 @@ def delete_expense(expense_id):
         # 2. Verify asset ownership for the current group in public.assets
         cur.execute("SELECT id FROM public.assets WHERE id = %s AND group_id = %s;", (asset_id, g.group_id))
         if cur.fetchone() is None:
-            # Although the expense exists, the asset owner is not in the current group
             return "Access denied: This expense is not part of your group's assets.", 403
 
         # 3. Soft-delete the expense in public.expenses
@@ -497,17 +615,6 @@ def summary():
             conn.close()
             
     return render_template('summary.html', summary=summary_data, group_id=g.group_id)
-
-@app.route('/group_management')
-@login_required
-def group_management():
-    """
-    Simple view showing the user their group ID and current username.
-    """
-    # g.username and g.group_id are guaranteed to exist by login_required
-    return render_template('group_management.html', 
-                           group_id=g.group_id, 
-                           username=g.username)
 
 # --- RUN THE APP ---
 if __name__ == '__main__':

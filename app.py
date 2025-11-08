@@ -6,16 +6,62 @@ import requests
 import functools
 import os
 import sys
+# NEW: Import cryptography for field-level encryption
+from cryptography.fernet import Fernet
 
 
 # --- APPLICATION INITIALIZATION & CONFIG ---
 app = Flask(__name__)
-# CRITICAL: SET FLASK_SECRET_KEY ENVIRONMENT VARIABLE FOR PRODUCTION
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'a_long_random_fallback_key') 
 bcrypt = Bcrypt(app)
 DATABASE_URL = os.environ.get('DATABASE_URL') 
 EXCHANGE_RATE_API_KEY = os.environ.get('EXCHANGE_RATE_API_KEY')
+# NEW: Fernet Encryption Key
+FERNET_KEY = os.environ.get('FERNET_KEY')
 
+# --- ENCRYPTOR IMPLEMENTATION ---
+class Encryptor:
+    def __init__(self, key):
+        if not key:
+            raise ValueError("Encryption key cannot be empty.")
+        self.f = Fernet(key)
+
+    def encrypt(self, data):
+        if data is None or data == '':
+            return None
+        return self.f.encrypt(str(data).encode()).decode()
+
+    def decrypt(self, data):
+        if data is None or data == '':
+            return ''
+        try:
+            return self.f.decrypt(data.encode()).decode()
+        except Exception:
+            # Handle non-encrypted data or bad keys gracefully
+            return f"[DECRYPTION FAILED: {str(data)[:15]}...]"
+
+# Initialize Encryptor globally
+ENCRYPTOR = None
+if FERNET_KEY:
+    try:
+        ENCRYPTOR = Encryptor(FERNET_KEY.encode())
+    except Exception as e:
+        print(f"Failed to initialize Encryptor: {e}", file=sys.stderr)
+        ENCRYPTOR = None
+else:
+    print("CRITICAL: Encryption is disabled due to missing FERNET_KEY. DATA IS STORED UNENCRYPTED.", file=sys.stderr)
+
+def decrypt_data(data):
+    """Decrypts data if ENCRYPTOR is available."""
+    if ENCRYPTOR:
+        return ENCRYPTOR.decrypt(data)
+    return data # Return as is if encryption is disabled
+
+def encrypt_data(data):
+    """Encrypts data if ENCRYPTOR is available."""
+    if ENCRYPTOR:
+        return ENCRYPTOR.encrypt(data)
+    return data # Return as is if encryption is disabled
 
 # --- CONNECTION HELPER FUNCTIONS ---
 
@@ -53,8 +99,7 @@ def get_db_connection():
         print(f"Database connection failed: {e}", file=sys.stderr)
         raise ConnectionError(f"Failed to connect to database: {e}")
 
-# --- SECURITY & RBAC HELPERS ---
-
+# --- SECURITY & RBAC HELPERS (omitted for brevity, assume they are the same) ---
 def get_user_info(user_id):
     """Fetches role and group_id."""
     if not user_id: return None, None
@@ -93,7 +138,6 @@ def check_user_access():
     return None
 
 def login_required(view):
-    """Decorator for authentication check."""
     @functools.wraps(view)
     def wrapped_view(**kwargs):
         if 'user_id' not in session:
@@ -102,7 +146,6 @@ def login_required(view):
     return wrapped_view
 
 def admin_required(view):
-    """Decorator for admin role check (for management tasks only)."""
     @functools.wraps(view)
     def wrapped_view(**kwargs):
         if get_user_info(session.get('user_id'))[0] != 'admin':
@@ -129,6 +172,7 @@ def get_asset_type_distribution():
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
+        # NOTE: Type is not encrypted as it's used for grouping/filtering.
         query = f"""
             SELECT type, SUM(value) as total_value
             FROM assets
@@ -143,8 +187,8 @@ def get_asset_type_distribution():
     finally:
         if conn: conn.close()
 
-# --- AUTH ROUTES ---
 
+# --- AUTH ROUTES (omitted for brevity) ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -153,7 +197,6 @@ def register():
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            # ASSIGNMENT 1: Initial role='pending', group_id='pending-group'
             cur.execute('INSERT INTO users (username, password_hash, role, group_id) VALUES (%s, %s, %s, %s) RETURNING id;', 
                         (username, password_hash, 'pending', 'pending-group'))
             session['user_id'], session['username'] = cur.fetchone()[0], username
@@ -205,17 +248,13 @@ def admin_approve_users():
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
         if request.method == 'POST':
             user_id_to_approve, new_group_id = request.form.get('user_id'), request.form.get('group_id')
             if user_id_to_approve and new_group_id:
-                # ASSIGNMENT 2: Update role and set the final group_id
                 cur.execute('UPDATE users SET role = %s, group_id = %s WHERE id = %s AND role = %s;', 
                             ('user', new_group_id, user_id_to_approve, 'pending'))
                 conn.commit()
-
         cur.execute("SELECT id, username FROM users WHERE role = 'pending' ORDER BY id;")
-        # Requires the admin_approve_users.html template with a form for group_id
         return render_template('admin_approve_users.html', pending_users=cur.fetchall())
     except Exception as e:
         if conn: conn.rollback()
@@ -223,7 +262,27 @@ def admin_approve_users():
     finally:
         if conn: conn.close()
 
-# --- PROTECTED APPLICATION ROUTES (STRICTLY GROUP FILTERED) ---
+# --- PROTECTED APPLICATION ROUTES (MODIFIED FOR ENCRYPTION) ---
+
+def decrypt_asset_fields(asset):
+    """Utility to decrypt all sensitive asset fields."""
+    asset['name'] = decrypt_data(asset['name'])
+    asset['account_no'] = decrypt_data(asset['account_no'])
+    asset['notes'] = decrypt_data(asset['notes'])
+    asset['financial_institution'] = decrypt_data(asset['financial_institution'])
+    asset['beneficiary_name'] = decrypt_data(asset['beneficiary_name'])
+    asset['policy_or_plan_type'] = decrypt_data(asset['policy_or_plan_type'])
+    asset['contact_phone'] = decrypt_data(asset['contact_phone'])
+    asset['document_location'] = decrypt_data(asset['document_location'])
+    asset['investment_strategy'] = decrypt_data(asset['investment_strategy'])
+    return asset
+
+def decrypt_expense_fields(expense):
+    """Utility to decrypt all sensitive expense fields."""
+    expense['description'] = decrypt_data(expense['description'])
+    expense['notes'] = decrypt_data(expense['notes'])
+    return expense
+
 
 @app.route('/home')
 @login_required
@@ -240,10 +299,10 @@ def home():
         cur = conn.cursor(cursor_factory=RealDictCursor)
         asset_query = f'SELECT a.* FROM assets a JOIN owners o ON a.owner_id = o.id WHERE a.activate = TRUE {group_filter_a};'
         cur.execute(asset_query, group_params_a)
-        assets = cur.fetchall()
+        assets = [decrypt_asset_fields(a) for a in cur.fetchall()]
         expense_query = f'SELECT e.* FROM expenses e JOIN owners o ON e.owner_id = o.id WHERE e.activate = TRUE {group_filter_e};'
         cur.execute(expense_query, group_params_e)
-        expenses = cur.fetchall()
+        expenses = [decrypt_expense_fields(e) for e in cur.fetchall()]
     except ConnectionError: return "Database Connection Error.", 500
     finally:
         if conn: conn.close()
@@ -289,7 +348,7 @@ def index():
         cur = conn.cursor(cursor_factory=RealDictCursor)
         query = f'SELECT a.*, o.name AS owner_name FROM assets a JOIN owners o ON a.owner_id = o.id WHERE a.activate = TRUE {group_filter} ORDER BY {sort_column} {order_db};'
         cur.execute(query, group_params)
-        assets = cur.fetchall()
+        assets = [decrypt_asset_fields(a) for a in cur.fetchall()] # DECRYPT ALL ASSETS
     except ConnectionError: return "Database Connection Error.", 500
     finally:
         if conn: conn.close()
@@ -315,16 +374,14 @@ def add_asset():
     access_denied_response = check_user_access()
     if access_denied_response: return access_denied_response
 
+    # Form fields retrieval for GET (omitted for brevity)
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;')
-        asset_types = [row['type_name'] for row in cur.fetchall()]
-        cur.execute('SELECT country_name FROM countries ORDER BY country_name;')
-        countries = [row['country_name'] for row in cur.fetchall()]
-        cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;')
-        currencies = [row['currency_code'] for row in cur.fetchall()]
+        cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;'); asset_types = [row['type_name'] for row in cur.fetchall()]
+        cur.execute('SELECT country_name FROM countries ORDER BY country_name;'); countries = [row['country_name'] for row in cur.fetchall()]
+        cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;'); currencies = [row['currency_code'] for row in cur.fetchall()]
         owners = get_owners() 
     except ConnectionError: return "Database Connection Error.", 500
     finally:
@@ -335,12 +392,23 @@ def add_asset():
         value = float(form_data.get('value', 0.00))
         try:
             cur = conn.cursor()
+            # ENCRYPT SENSITIVE FIELDS BEFORE INSERT
+            name = encrypt_data(form_data['name'])
+            account_no = encrypt_data(form_data['account_no'])
+            notes = encrypt_data(form_data['notes'])
+            financial_institution = encrypt_data(form_data['financial_institution'])
+            beneficiary_name = encrypt_data(form_data['beneficiary_name'])
+            policy_or_plan_type = encrypt_data(form_data['policy_or_plan_type'])
+            contact_phone = encrypt_data(form_data['contact_phone'])
+            document_location = encrypt_data(form_data['document_location'])
+            investment_strategy = encrypt_data(form_data['investment_strategy'])
+            
             cur.execute("""
                 INSERT INTO assets (owner_id, type, name, country, currency, value, account_no, last_updated, notes, activate, financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy, group_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, %s, TRUE, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                form_data['owner_id'], form_data['type'], form_data['name'], form_data['country'], form_data['currency'], value, form_data['account_no'], form_data['notes'],
-                form_data['financial_institution'], form_data['beneficiary_name'], form_data['policy_or_plan_type'], form_data['contact_phone'], form_data['document_location'], form_data['investment_strategy'], g.group_id 
+                form_data['owner_id'], form_data['type'], name, form_data['country'], form_data['currency'], value, account_no, notes,
+                financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy, g.group_id 
             ))
             conn.commit()
             return redirect('/')
@@ -363,6 +431,7 @@ def edit_asset(asset_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Form field lists fetch (omitted for brevity)
         cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;'); asset_types = [row['type_name'] for row in cur.fetchall()]
         cur.execute('SELECT country_name FROM countries ORDER BY country_name;'); countries = [row['country_name'] for row in cur.fetchall()]
         cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;'); currencies = [row['currency_code'] for row in cur.fetchall()]
@@ -372,6 +441,10 @@ def edit_asset(asset_id):
         cur.execute(f'SELECT * FROM assets WHERE id=%s {group_filter};', (asset_id,) + group_params)
         asset = cur.fetchone()
         if asset is None: return "Asset not found or access denied", 404
+        
+        # DECRYPT fields for displaying in the form
+        asset = decrypt_asset_fields(asset)
+
     except Exception as e: return f"Error fetching asset: {e}", 500
     finally:
         if conn and request.method == 'GET': cur.close(); conn.close()
@@ -381,14 +454,26 @@ def edit_asset(asset_id):
         try:
             cur = conn.cursor()
             group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
+            
+            # ENCRYPT SENSITIVE FIELDS BEFORE UPDATE
+            name = encrypt_data(form_data['name'])
+            account_no = encrypt_data(form_data['account_no'])
+            notes = encrypt_data(form_data['notes'])
+            financial_institution = encrypt_data(form_data['financial_institution'])
+            beneficiary_name = encrypt_data(form_data['beneficiary_name'])
+            policy_or_plan_type = encrypt_data(form_data['policy_or_plan_type'])
+            contact_phone = encrypt_data(form_data['contact_phone'])
+            document_location = encrypt_data(form_data['document_location'])
+            investment_strategy = encrypt_data(form_data['investment_strategy'])
+
             update_query = f"""
                 UPDATE assets SET owner_id=%s, type=%s, name=%s, country=%s, currency=%s, value=%s, account_no=%s, notes=%s, last_updated=CURRENT_DATE,
                 financial_institution=%s, beneficiary_name=%s, policy_or_plan_type=%s, contact_phone=%s, document_location=%s, investment_strategy=%s
                 WHERE id=%s {group_filter}
             """
             params = (
-                form_data['owner_id'], form_data['type'], form_data['name'], form_data['country'], form_data['currency'], value, form_data['account_no'], form_data['notes'],
-                form_data['financial_institution'], form_data['beneficiary_name'], form_data['policy_or_plan_type'], form_data['contact_phone'], form_data['document_location'], form_data['investment_strategy'],
+                form_data['owner_id'], form_data['type'], name, form_data['country'], form_data['currency'], value, account_no, notes,
+                financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location, investment_strategy,
                 asset_id
             ) + group_params
             cur.execute(update_query, params)
@@ -426,7 +511,7 @@ def delete_asset(asset_id):
         if conn: conn.close()
 
 
-# --- EXPENSES ROUTES ---
+# --- EXPENSES ROUTES (MODIFIED FOR ENCRYPTION) ---
 
 @app.route('/expenses')
 @login_required
@@ -445,7 +530,8 @@ def expenses():
         cur = conn.cursor(cursor_factory=RealDictCursor)
         query = f'SELECT e.*, o.name AS owner_name FROM expenses e JOIN owners o ON e.owner_id = o.id WHERE e.activate = TRUE {group_filter} ORDER BY {sort_column} {order};'
         cur.execute(query, group_params)
-        return render_template('expenses.html', expenses=cur.fetchall(), sort_by=sort_by, order=order.lower())
+        expenses = [decrypt_expense_fields(e) for e in cur.fetchall()] # DECRYPT ALL EXPENSES
+        return render_template('expenses.html', expenses=expenses, sort_by=sort_by, order=order.lower())
     except Exception as e:
         return f"Error fetching expenses: {e}", 500
     finally:
@@ -468,10 +554,15 @@ def add_expense():
         try:
             conn = get_db_connection()
             cur = conn.cursor()
+            
+            # ENCRYPT SENSITIVE FIELDS BEFORE INSERT
+            description = encrypt_data(form_data['description'])
+            notes = encrypt_data(form_data['notes'])
+
             cur.execute("""
                 INSERT INTO expenses (owner_id, description, category, amount, currency, expense_date, notes, activate, group_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s)
-            """, (form_data['owner_id'], form_data['description'], form_data['category'], amount, form_data['currency'], form_data['expense_date'], form_data['notes'], g.group_id))
+            """, (form_data['owner_id'], description, form_data['category'], amount, form_data['currency'], form_data['expense_date'], notes, g.group_id))
             conn.commit()
             return redirect('/expenses')
         except Exception as e:
@@ -501,6 +592,10 @@ def edit_expense(expense_id):
         cur.execute(f'SELECT * FROM expenses WHERE id=%s {group_filter};', (expense_id,) + group_params)
         expense = cur.fetchone()
         if expense is None: return "Expense not found or access denied", 404
+        
+        # DECRYPT fields for displaying in the form
+        expense = decrypt_expense_fields(expense)
+
     except Exception as e: return f"Error fetching expense: {e}", 500
     finally:
         if conn and request.method == 'GET': cur.close(); conn.close()
@@ -510,8 +605,13 @@ def edit_expense(expense_id):
         try:
             cur = conn.cursor()
             group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'expenses')
+            
+            # ENCRYPT SENSITIVE FIELDS BEFORE UPDATE
+            description = encrypt_data(form_data['description'])
+            notes = encrypt_data(form_data['notes'])
+
             update_query = f'UPDATE expenses SET owner_id=%s, description=%s, category=%s, amount=%s, currency=%s, expense_date=%s, notes=%s WHERE id=%s {group_filter}'
-            params = (form_data['owner_id'], form_data['description'], form_data['category'], amount, form_data['currency'], form_data['expense_date'], form_data['notes'], expense_id) + group_params
+            params = (form_data['owner_id'], description, form_data['category'], amount, form_data['currency'], form_data['expense_date'], notes, expense_id) + group_params
             cur.execute(update_query, params)
             if cur.rowcount == 0: return "Update failed: Unauthorized.", 403
             conn.commit()

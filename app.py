@@ -10,6 +10,7 @@ import sys
 
 # --- APPLICATION INITIALIZATION & CONFIG ---
 app = Flask(__name__)
+# CRITICAL: SET FLASK_SECRET_KEY ENVIRONMENT VARIABLE FOR PRODUCTION
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'a_long_random_fallback_key') 
 bcrypt = Bcrypt(app)
 DATABASE_URL = os.environ.get('DATABASE_URL') 
@@ -214,6 +215,7 @@ def admin_approve_users():
                 conn.commit()
 
         cur.execute("SELECT id, username FROM users WHERE role = 'pending' ORDER BY id;")
+        # Requires the admin_approve_users.html template with a form for group_id
         return render_template('admin_approve_users.html', pending_users=cur.fetchall())
     except Exception as e:
         if conn: conn.rollback()

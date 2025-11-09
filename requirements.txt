@@ -8,3 +8,6 @@ firebase-admin==6.9.0
 cryptography~=42.0
 tqdm~=4.66
 Flask-Mail~=0.9
+Flask-WTF>=1.2.1
+Flask-Limiter>=3.6.0
+

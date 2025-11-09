@@ -1,120 +1,102 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Full Financial Summary</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #f4f7f9;
-        }
-        .summary-card {
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
-            transition: transform 0.3s ease-in-out;
-        }
-        .summary-card:hover {
-            transform: translateY(-2px);
-        }
-    </style>
-</head>
-<body class="p-4 md:p-8">
-    <div class="max-w-4xl mx-auto">
-        <header class="mb-8">
-            <h1 class="text-4xl font-extrabold text-gray-800 mb-2">Full Financial Summary</h1>
-            <p class="text-gray-600">Total active Assets and Expenses across all time for your group, converted to both USD and INR.</p>
-        </header>
+{% extends "base.html" %}
 
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                <div class="mb-4">
-                    {% for category, message in messages %}
-                        <div class="p-3 mb-2 rounded-lg text-sm {% if category == 'error' %}bg-red-100 text-red-700{% elif category == 'success' %}bg-green-100 text-green-700{% else %}bg-blue-100 text-blue-700{% endif %}" role="alert">
-                            {{ message }}
-                        </div>
-                    {% endfor %}
-                </div>
+{% block title %}Dashboard | Finance Tracker{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto">
+    <header class="mb-8 border-b pb-4">
+        <h1 class="text-4xl font-extrabold text-gray-800 mb-2">Dashboard Overview</h1>
+        <p class="text-gray-600">
+            View your group's current financial status, calculated based on all active assets and expenses.
+        </p>
+        <div class="mt-2 text-sm text-gray-500">
+            <span>User: <strong class="text-indigo-600">{{ g.user_name if g.user_name else 'N/A' }}</strong> (Role: <strong class="text-indigo-600">{{ g.user_role }}</strong>)</span> 
+            {% if g.group_id %}
+                <span class="ml-4">| Group ID: <strong class="text-indigo-600">{{ g.group_id }}</strong></span>
+            {% else %}
+                <span class="ml-4">| Group: <strong class="text-orange-500">None Assigned</strong></span>
             {% endif %}
-        {% endwith %}
+        </div>
+    </header>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            
-            <!-- Total Assets Card -->
-            <div class="summary-card bg-white p-6 rounded-xl border-t-4 border-green-500">
+    <!-- FINANCIAL SUMMARY CARDS -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        
+        <!-- Total Assets Card -->
+        <div class="card p-6 border-t-4 border-green-500">
+            <div class="flex items-center justify-between">
                 <p class="text-lg font-semibold text-gray-500 mb-1">Total Assets</p>
-                <p class="text-3xl font-bold text-green-600">
-                    ${{ "%.2f" | format(summary.total_assets_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
-                </p>
-                <p class="text-lg font-medium text-gray-700 mt-2">
-                    {% if summary.total_assets_inr != 'N/A' %}
-                        <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.total_assets_inr) }}
-                    {% else %}
-                        <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
-                    {% endif %}
-                </p>
-                <div class="text-xs text-gray-400 mt-3">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-                    </svg>
-                    Sum of all active assets (USD basis).
-                </div>
+                <i data-lucide="wallet" class="w-6 h-6 text-green-500"></i>
             </div>
-
-            <!-- Total Expenses Card -->
-            <div class="summary-card bg-white p-6 rounded-xl border-t-4 border-red-500">
-                <p class="text-lg font-semibold text-gray-500 mb-1">Total Expenses</p>
-                <p class="text-3xl font-bold text-red-600">
-                    ${{ "%.2f" | format(summary.total_expenses_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
-                </p>
-                <p class="text-lg font-medium text-gray-700 mt-2">
-                    {% if summary.total_expenses_inr != 'N/A' %}
-                        <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.total_expenses_inr) }}
-                    {% else %}
-                        <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
-                    {% endif %}
-                </p>
-                <div class="text-xs text-gray-400 mt-3">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M13 17h8m0 0V9m0 8l-8-8-4 4-6-6" />
-                    </svg>
-                    Sum of all active expenses (USD basis).
-                </div>
-            </div>
-
-            <!-- Net Balance Card -->
-            {% set net_color = 'green-600' if summary.net_balance_usd >= 0 else 'red-600' %}
-            {% set net_border = 'green-500' if summary.net_balance_usd >= 0 else 'red-500' %}
-            <div class="summary-card bg-white p-6 rounded-xl border-t-4 border-{{ net_border }}">
-                <p class="text-lg font-semibold text-gray-500 mb-1">Net Balance</p>
-                <p class="text-3xl font-bold text-{{ net_color }}">
-                    ${{ "%.2f" | format(summary.net_balance_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
-                </p>
-                <p class="text-lg font-medium text-gray-700 mt-2">
-                    {% if summary.net_balance_inr != 'N/A' %}
-                        <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.net_balance_inr) }}
-                    {% else %}
-                        <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
-                    {% endif %}
-                </p>
-                <div class="text-xs text-gray-400 mt-3">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                    </svg>
-                    Total Assets minus Total Expenses.
-                </div>
-            </div>
-
+            <p class="text-3xl font-bold text-green-600">
+                ${{ "%.2f" | format(summary.total_assets_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
+            </p>
+            <p class="text-lg font-medium text-gray-700 mt-2">
+                {% if summary.total_assets_inr != 'N/A' %}
+                    <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.total_assets_inr) }}
+                {% else %}
+                    <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
+                {% endif %}
+            </p>
         </div>
 
-        <div class="mt-8">
-            <!-- Assumes an 'index' route exists for the main dashboard -->
-            <a href="{{ url_for('home') }}" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition duration-150 ease-in-out">
-                &larr; Back to Dashboard
+        <!-- Total Expenses Card -->
+        <div class="card p-6 border-t-4 border-red-500">
+            <div class="flex items-center justify-between">
+                <p class="text-lg font-semibold text-gray-500 mb-1">Total Expenses</p>
+                 <i data-lucide="shopping-cart" class="w-6 h-6 text-red-500"></i>
+            </div>
+            <p class="text-3xl font-bold text-red-600">
+                ${{ "%.2f" | format(summary.total_expenses_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
+            </p>
+            <p class="text-lg font-medium text-gray-700 mt-2">
+                {% if summary.total_expenses_inr != 'N/A' %}
+                    <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.total_expenses_inr) }}
+                {% else %}
+                    <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
+                {% endif %}
+            </p>
+        </div>
+
+        <!-- Net Balance Card -->
+        {% set net_color = 'green-600' if summary.net_balance_usd >= 0 else 'red-600' %}
+        {% set net_border = 'green-500' if summary.net_balance_usd >= 0 else 'red-500' %}
+        <div class="card p-6 border-t-4 border-{{ net_border }}">
+            <div class="flex items-center justify-between">
+                <p class="text-lg font-semibold text-gray-500 mb-1">Net Balance</p>
+                <i data-lucide="line-chart" class="w-6 h-6 text-indigo-500"></i>
+            </div>
+            <p class="text-3xl font-bold text-{{ net_color }}">
+                ${{ "%.2f" | format(summary.net_balance_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
+            </p>
+            <p class="text-lg font-medium text-gray-700 mt-2">
+                {% if summary.net_balance_inr != 'N/A' %}
+                    <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.net_balance_inr) }}
+                {% else %}
+                    <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
+                {% endif %}
+            </p>
+        </div>
+
+    </div>
+    <!-- END FINANCIAL SUMMARY CARDS -->
+
+    <div class="mt-10 pt-6 border-t border-gray-200">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Quick Actions</h2>
+        <div class="flex flex-wrap gap-4">
+            <a href="{{ url_for('expenses') }}" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 transition duration-150 ease-in-out">
+                <i data-lucide="list-checks" class="h-5 w-5 mr-2"></i>
+                Manage Expenses
+            </a>
+            <a href="{{ url_for('assets') }}" class="inline-flex items-center px-4 py-2 border border-indigo-600 text-sm font-medium rounded-md shadow-sm text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition duration-150 ease-in-out">
+                <i data-lucide="database" class="h-5 w-5 mr-2"></i>
+                Manage Assets
+            </a>
+            <a href="{{ url_for('add_expense') }}" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-500 hover:bg-red-600 transition duration-150 ease-in-out">
+                <i data-lucide="plus-circle" class="h-5 w-5 mr-2"></i>
+                Report New Expense
             </a>
         </div>
-        
     </div>
-</body>
-</html>
+</div>
+{% endblock %}

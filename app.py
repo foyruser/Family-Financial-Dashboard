@@ -831,8 +831,9 @@ def assets():
             ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC;
         """, gp)
         rows = cur.fetchall()
+
+        # Decrypt and format dates
         for r in rows:
-            # decrypt only if encrypted (legacy plaintext kept)
             r["account_no"] = dec(r["account_no"])
             r["beneficiary_name"] = dec(r["beneficiary_name"])
             r["contact_phone"] = dec(r["contact_phone"])
@@ -850,8 +851,70 @@ def assets():
             try: cur.close()
             except: pass
             conn.close()
-    # Assumes you added templates/assets.html from our previous message
-    return render_template("assets.html", assets=rows)
+
+    # -------- USD equivalent (API with INR fallback) --------
+    # We only need INR->USD for your current data; if you later add other currencies
+    # you can extend this to fetch per-currency rates once and cache.
+    inr_to_usd = None
+    try:
+        # Try a quick public rate (keep short timeout)
+        import requests
+        res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
+        data = res.json()
+        usd_to_inr = data["rates"]["INR"]  # 1 USD = X INR
+        inr_to_usd = 1.0 / float(usd_to_inr)
+    except Exception as e:
+        print("FX fetch failed; using fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
+        inr_to_usd = 1.0 / 83.0  # fallback: 1 INR ≈ 0.012048 USD
+
+    for r in rows:
+        curr = (r.get("currency") or "").upper()
+        try:
+            val = float(r.get("current_value") or r.get("value") or 0.0)
+        except Exception:
+            val = 0.0
+
+        if curr == "USD":
+            r["usd_value"] = round(val, 2)
+        elif curr == "INR":
+            r["usd_value"] = round(val * inr_to_usd, 2)
+        else:
+            # Unknown currency → no conversion (show None so it's sortable as 0)
+            r["usd_value"] = None
+
+    # -------- Sorting --------
+    # ?sort=<field>&order=asc|desc
+    # Supported sort fields:
+    sortable_fields = {
+        "name", "type", "country", "currency", "last_updated",
+        "usd_value", "current_value", "added_date"
+    }
+    sort_by = request.args.get("sort", "usd_value")
+    order = request.args.get("order", "desc").lower()
+    if sort_by not in sortable_fields:
+        sort_by = "usd_value"
+    if order not in ("asc", "desc"):
+        order = "desc"
+
+    reverse = (order == "desc")
+
+    def sort_key(r):
+        v = r.get(sort_by)
+        # Normalize for robust sorting
+        if sort_by in ("usd_value", "current_value"):
+            try:
+                return float(v or 0.0)
+            except Exception:
+                return 0.0
+        # Dates are strings "YYYY-MM-DD" now; sort lexicographically works fine
+        if sort_by in ("last_updated", "added_date"):
+            return v or ""
+        # Strings
+        return (str(v or "")).lower()
+
+    rows = sorted(rows, key=sort_key, reverse=reverse)
+
+    return render_template("assets.html", assets=rows, sort_by=sort_by, order=order)
 
 @app.route("/add_asset", methods=["GET", "POST"])
 @login_required
@@ -1127,3 +1190,4 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+

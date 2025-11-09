@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Reset Password</title>
+</head>
+<body>
+    <h1>Reset Password</h1>
+
+    {% if invalid %}
+        <p style="color: red;">{{ message }}</p>
+        <p><a href="{{ url_for('forgot_password') }}">Request a new link.</a></p>
+    {% else %}
+        {% if message %}
+            <p style="color: red;">{{ message }}</p>
+        {% endif %}
+        
+        <form method="POST" action="{{ url_for('reset_password', token=token) }}">
+            <label for="new_password">New Password:</label>
+            <input type="password" id="new_password" name="new_password" required minlength="8"><br>
+
+            <label for="confirm_password">Confirm New Password:</label>
+            <input type="password" id="confirm_password" name="confirm_password" required minlength="8"><br>
+
+            <button type="submit">Reset Password</button>
+        </form>
+    {% endif %}
+</body>
+</html>

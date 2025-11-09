@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h1 class="text-3xl font-extrabold text-gray-900 mb-6 flex items-center">
+    <i data-lucide="layout-dashboard" class="w-7 h-7 mr-2"></i>
+    Welcome, {{ g.username }}!
+</h1>
+
+<!-- Stats Overview -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+    
+    <!-- Total Expenses Stat -->
+    <div class="card p-6 rounded-xl border border-gray-100">
+        <div class="flex items-center justify-between">
+            <p class="text-sm font-medium text-gray-500">Total Expenses Logged</p>
+            <i data-lucide="file-text" class="w-5 h-5 text-indigo-500"></i>
+        </div>
+        <p class="mt-1 text-3xl font-bold text-gray-900">{{ summary_data.total_expenses }}</p>
+    </div>
+
+    <!-- Monthly Spending Stat -->
+    <div class="card p-6 rounded-xl border border-gray-100">
+        <div class="flex items-center justify-between">
+            <p class="text-sm font-medium text-gray-500">Monthly Spending (Current)</p>
+            <i data-lucide="trending-down" class="w-5 h-5 text-red-500"></i>
+        </div>
+        <p class="mt-1 text-3xl font-bold text-gray-900">
+            {{ summary_data.monthly_total | round(2) }} {{ summary_data.base_currency }}
+        </p>
+    </div>
+
+    <!-- Quick Add Button -->
+    <div class="card p-6 rounded-xl border border-gray-100 flex flex-col justify-center items-center bg-indigo-50 hover:bg-indigo-100 transition-colors">
+        <a href="{{ url_for('add_expense') }}" class="w-full text-center py-3 rounded-lg font-semibold btn-primary flex items-center justify-center">
+            <i data-lucide="plus-circle" class="w-5 h-5 mr-2"></i>
+            Add New Expense
+        </a>
+    </div>
+</div>
+
+<!-- Recent Transactions -->
+<div class="card p-6 rounded-xl">
+    <h2 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
+        <i data-lucide="history" class="w-5 h-5 mr-2 text-gray-600"></i>
+        Recent Transactions
+    </h2>
+    
+    {% if summary_data.recent_expenses %}
+    <ul class="divide-y divide-gray-100">
+        {% for expense in summary_data.recent_expenses %}
+        <li class="py-3 flex items-center justify-between">
+            <div>
+                <p class="text-sm font-semibold text-gray-800">{{ expense.description | default('No Description', true) }}</p>
+                <p class="text-xs text-gray-500">{{ expense.expense_date_fmt }}</p>
+            </div>
+            <p class="text-base font-medium text-gray-900">
+                {{ expense.amount | round(2) }} {{ expense.currency }}
+            </p>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-gray-500 text-center py-4">No recent expenses found. Start tracking your spending!</p>
+    {% endif %}
+
+    <div class="mt-6 text-center">
+        <a href="{{ url_for('expenses') }}" class="text-indigo-600 hover:text-indigo-500 font-medium text-sm">
+            View All Expenses &rarr;
+        </a>
+    </div>
+</div>
+
+{% endblock %}

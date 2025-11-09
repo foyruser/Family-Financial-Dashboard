@@ -5,12 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Error</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        /* Custom styles for a clean, modern look */
-        body { font-family: 'Inter', sans-serif; background-color: #f4f7f9; }
-    </style>
-</head>
-<body class="flex items-center justify-center min-h-screen p-4">
+    </head>
+<body class="flex items-center justify-center min-h-screen p-4 bg-gray-100 font-sans">
     <div class="max-w-md w-full bg-white p-8 rounded-xl shadow-2xl text-center border-t-4 border-red-500">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 text-red-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -18,7 +14,7 @@
         <h1 class="text-3xl font-bold text-gray-800 mb-4">Oops! An Error Occurred.</h1>
         <p class="text-gray-600 mb-6">
             {% if message %}
-                {{ message }}
+                **{{ message }}**
             {% else %}
                 We ran into a problem processing your request.
             {% endif %}

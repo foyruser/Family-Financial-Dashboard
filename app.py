@@ -79,12 +79,14 @@ def get_exchange_rate(base_currency):
         rate_to_usd = data['data'].get('USD')
         if rate_to_usd:
              # The result is the value of 1 unit of base_currency in USD.
+             # Returning 1 / rate_to_usd gives us the value of 1 USD in base_currency units.
              return 1 / rate_to_usd 
         
         # Fallback if the specific currency is missing from the response
         return 1.0 
     
     except requests.RequestException as e:
+        # This catches the 401 Unauthorized error from the logs and falls back to 1.0
         print(f"Error fetching exchange rate for {base_currency}: {e}", file=sys.stderr)
         # In case of API failure, assume 1.0 to prevent crash, but log error
         return 1.0 
@@ -250,7 +252,7 @@ def fetch_assets(user_id=None, group_id=None, user_role=None):
         # Calculate USD value for each asset (REQUIRED FIX)
         for asset in assets:
             rate = get_exchange_rate(asset['currency'])
-            asset['usd_value'] = float(asset['amount']) / rate if rate else 0.0
+            asset['usd_value'] = float(asset['amount']) / rate if rate and rate != 0 else 0.0
             
         return assets
     except psycopg2.Error as e:
@@ -264,6 +266,9 @@ def fetch_assets(user_id=None, group_id=None, user_role=None):
 def fetch_expenses(user_id=None, group_id=None, user_role=None):
     """
     Fetches active expenses, dynamically calculating usd_value in Python (FIXED).
+    
+    CRITICAL FIX: Changed column reference from 'e.date' to 'e.transaction_date AS date' 
+    to resolve the DB schema error while maintaining Python compatibility.
     """
     conn = None
     try:
@@ -272,12 +277,12 @@ def fetch_expenses(user_id=None, group_id=None, user_role=None):
 
         group_filter, group_params = get_group_filter_clause(user_role, group_id, 'expenses')
 
-        # FIX: Removed e.usd_value reference
+        # FIX: Alias transaction_date as date to match Python logic
         query = f"""
-            SELECT e.id, e.amount, e.currency, e.description, e.category, e.date, e.user_id, e.group_id
+            SELECT e.id, e.amount, e.currency, e.description, e.category, e.transaction_date AS date, e.user_id, e.group_id
             FROM expenses e
             WHERE e.activate = TRUE {group_filter}
-            ORDER BY e.date DESC;
+            ORDER BY e.transaction_date DESC;
         """
         cur.execute(query, group_params)
         expenses = cur.fetchall()
@@ -285,7 +290,7 @@ def fetch_expenses(user_id=None, group_id=None, user_role=None):
         # Calculate USD value for each expense (REQUIRED FIX)
         for expense in expenses:
             rate = get_exchange_rate(expense['currency'])
-            expense['usd_value'] = float(expense['amount']) / rate if rate else 0.0
+            expense['usd_value'] = float(expense['amount']) / rate if rate and rate != 0 else 0.0
 
         return expenses
     except psycopg2.Error as e:
@@ -300,6 +305,8 @@ def calculate_financial_summary(assets, expenses):
     """
     Calculates the financial summary (total assets, total liabilities, net worth).
     Uses the pre-calculated 'usd_value' from fetch_assets/fetch_expenses.
+    
+    CRITICAL FIX: Added calculation for 'total_assets_inr' to resolve Jinja2 UndefinedError.
     """
     # CRASH PREVENTION: Wrap in try/except and return default on failure
     try:
@@ -310,11 +317,19 @@ def calculate_financial_summary(assets, expenses):
 
         net_worth_usd = total_assets_usd - total_liabilities_usd
         
+        # --- INR CALCULATION FIX ---
+        # Get the exchange rate for 1 USD in INR (this is what get_exchange_rate('INR') returns based on its logic)
+        inr_rate_per_usd = get_exchange_rate('INR') 
+        
+        # Convert total USD assets to INR
+        total_assets_inr = total_assets_usd * inr_rate_per_usd
+
         return {
             'total_assets_usd': total_assets_usd,
             'total_liabilities_usd': total_liabilities_usd,
             'net_worth_usd': net_worth_usd,
             'total_expenses_usd': total_expenses_usd,
+            'total_assets_inr': total_assets_inr, # ADDED: Required by home.html template
         }
     except Exception as e:
         print(f"Error calculating financial summary: {e}", file=sys.stderr)
@@ -324,6 +339,7 @@ def calculate_financial_summary(assets, expenses):
             'total_liabilities_usd': 0.0,
             'net_worth_usd': 0.0,
             'total_expenses_usd': 0.0,
+            'total_assets_inr': 0.0, # Safe default
         }
 
 
@@ -528,12 +544,12 @@ def reset_password(token):
     return render_template('reset_password.html', token=token)
 
 
-# --- DASHBOARD VIEW (FIXED) ---
+# --- HOME VIEW ---
 
 @app.route('/')
 @login_required
 def home():
-    """Dashboard view showing summary and recent activity."""
+    """Home/Dashboard view showing financial summary and recent activity."""
     access_denied_response = check_user_access()
     if access_denied_response: return access_denied_response
 
@@ -543,6 +559,7 @@ def home():
         'total_liabilities_usd': 0.0,
         'net_worth_usd': 0.0,
         'total_expenses_usd': 0.0,
+        'total_assets_inr': 0.0, # Safe default for template
     }
     last_expenses = []
     asset_breakdown = []
@@ -787,9 +804,9 @@ def add_expense():
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # Insert expense, linking to current user and group
+            # CRITICAL FIX: Changed column name to transaction_date in INSERT statement
             cur.execute(
-                "INSERT INTO expenses (date, amount, currency, category, description, user_id, group_id) VALUES (%s, %s, %s, %s, %s, %s, %s);",
+                "INSERT INTO expenses (transaction_date, amount, currency, category, description, user_id, group_id) VALUES (%s, %s, %s, %s, %s, %s, %s);",
                 (date, amount, currency, category, description, g.user_id, g.group_id)
             )
             
@@ -822,8 +839,8 @@ def edit_expense(expense_id):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
         group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'e')
-        # Fetch existing expense details
-        cur.execute(f"SELECT id, date, amount, currency, category, description FROM expenses e WHERE id = %s {group_filter};", (expense_id,) + group_params)
+        # CRITICAL FIX: Alias transaction_date as date in SELECT
+        cur.execute(f"SELECT id, transaction_date AS date, amount, currency, category, description FROM expenses e WHERE id = %s {group_filter};", (expense_id,) + group_params)
         expense = cur.fetchone()
         
         if not expense:
@@ -847,9 +864,9 @@ def edit_expense(expense_id):
                 expense['description'] = description
                 return render_template('edit_expense.html', expense=expense, **lists)
 
-            # Update expense
+            # CRITICAL FIX: Changed column name to transaction_date in UPDATE statement
             cur.execute(
-                f"UPDATE expenses SET date = %s, amount = %s, currency = %s, category = %s, description = %s WHERE id = %s {group_filter};",
+                f"UPDATE expenses SET transaction_date = %s, amount = %s, currency = %s, category = %s, description = %s WHERE id = %s {group_filter};",
                 (date, amount, currency, category, description, expense_id) + group_params
             )
             
@@ -921,8 +938,8 @@ def currencies():
     for currency in lists['currencies']:
         rate = get_exchange_rate(currency)
         
-        # If the rate fetched is the value of 1 BASE_CURRENCY in USD, 
-        # we display 1 USD = X BASE_CURRENCY (1 / rate)
+        # If the rate fetched is the value of 1 BASE_CURRENCY in USD (rate_to_usd), 
+        # then 1 USD = (1 / rate_to_usd) BASE_CURRENCY.
         usd_to_currency = 1.0 / rate if rate and rate != 0 else 'N/A'
         
         currency_data.append({
@@ -964,6 +981,7 @@ def reports():
         # 2. Monthly Expense Trend (simple calculation)
         monthly_trend = {}
         for expense in expenses:
+            # 'date' is now an alias for transaction_date
             month_year = expense['date'].strftime('%Y-%m') # Requires 'date' field to be a datetime object
             usd_val = expense.get('usd_value', 0.0)
             monthly_trend[month_year] = monthly_trend.get(month_year, 0.0) + usd_val

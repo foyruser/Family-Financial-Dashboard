@@ -272,7 +272,8 @@ def login():
             return render_template('login.html')
 
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT id, username, password_hash, role, group_id FROM users WHERE id = %s;', (username,))
+        # FIX APPLIED: Correctly search by 'username' (which holds the email string), not the integer 'id'
+        cur.execute('SELECT id, username, password_hash, role, group_id FROM users WHERE username = %s;', (username,))
         user = cur.fetchone()
         cur.close()
         conn.close()
@@ -354,14 +355,18 @@ def logout():
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
-        username = request.form['username']
+        # The user typically inputs their username (which is their email) here.
+        username_or_email = request.form['username'] 
         conn = get_db_connection()
         if not conn:
             flash("System error. Please try again.", 'error')
             return render_template('forgot_password.html')
 
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT email FROM users WHERE username = %s;', (username,))
+        
+        # FIX APPLIED: Find the user by the input string (username/email)
+        cur.execute('SELECT id, email, username FROM users WHERE username = %s OR email = %s;', 
+                    (username_or_email, username_or_email))
         user = cur.fetchone()
         
         # Security: Don't confirm if email exists, just send a success message always
@@ -373,11 +378,13 @@ def forgot_password():
             expiration = datetime.now() + timedelta(hours=1)
             
             try:
-                # Save token and expiration
-                cur.execute('UPDATE users SET reset_token = %s, token_expiration = %s WHERE email = %s;', 
-                            (token, expiration, user['email']))
+                # FIX APPLIED: Use the retrieved integer 'user['id']' for the UPDATE WHERE clause
+                user_email = user['email']
+                
+                cur.execute('UPDATE users SET reset_token = %s, token_expiration = %s WHERE id = %s;', 
+                            (token, expiration, user['id']))
                 conn.commit()
-                send_password_reset_email(user['email'], token)
+                send_password_reset_email(user_email, token)
             except Exception as e:
                 conn.rollback()
                 print(f"Error saving/sending token: {e}", file=sys.stderr)

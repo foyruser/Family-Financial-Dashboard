@@ -25,7 +25,7 @@
         <div class="flex items-center space-x-8">
           <a href="{{ url_for('home') }}" class="text-lg font-extrabold text-indigo-600">💰 Dream Bee Network</a>
           {% if g.user_id %}
-            <a href="{{ url_for('dashboard') }}" class="text-gray-600 hover:text-indigo-600 text-sm font-medium {% if request.endpoint == 'dashboard' %}text-indigo-600 font-semibold{% endif %}">Dashboard</a>
+            <a href="{{ url_for('dashboard') }}" class="text-gray-600 hover:text-indigo-600 text-sm font-medium {% if request.endpoint == 'home' %}text-indigo-600 font-semibold{% endif %}">Dashboard</a>
             <a href="{{ url_for('expenses') }}" class="text-gray-600 hover:text-indigo-600 text-sm font-medium {% if request.endpoint == 'expenses' %}text-indigo-600 font-semibold{% endif %}">Expenses</a>
             <a href="{{ url_for('assets') }}" class="text-gray-600 hover:text-indigo-600 text-sm font-medium {% if request.endpoint == 'assets' %}text-indigo-600 font-semibold{% endif %}">Assets</a>
             <a href="{{ url_for('group_management') }}" class="text-gray-600 hover:text-indigo-600 text-sm font-medium {% if request.endpoint == 'group_management' %}text-indigo-600 font-semibold{% endif %}">Group</a>

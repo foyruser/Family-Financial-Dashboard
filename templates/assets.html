@@ -16,16 +16,29 @@
   <div class="overflow-x-auto">
     <table class="min-w-full text-sm">
       <thead class="bg-gray-50 text-gray-600 uppercase text-xs">
+        {% set next = 'asc' if order == 'desc' else 'desc' %}
         <tr>
-          <th class="px-6 py-3 text-left">Name</th>
-          <th class="px-6 py-3 text-left">Type</th>
-          <th class="px-6 py-3 text-left">Country</th>
-          <th class="px-6 py-3 text-left">Currency</th>
-          <th class="px-6 py-3 text-right">Current Value</th>
+          <th class="px-6 py-3 text-left">
+            <a class="hover:underline" href="{{ url_for('assets', sort='name', order=next) }}">Name</a>
+          </th>
+          <th class="px-6 py-3 text-left">
+            <a class="hover:underline" href="{{ url_for('assets', sort='type', order=next) }}">Type</a>
+          </th>
+          <th class="px-6 py-3 text-left">
+            <a class="hover:underline" href="{{ url_for('assets', sort='country', order=next) }}">Country</a>
+          </th>
+          <th class="px-6 py-3 text-left">
+            <a class="hover:underline" href="{{ url_for('assets', sort='currency', order=next) }}">Currency</a>
+          </th>
+          <th class="px-6 py-3 text-right">
+            <a class="hover:underline" href="{{ url_for('assets', sort='usd_value', order=next) }}">Current Value</a>
+          </th>
           <th class="px-6 py-3 text-left">Account / Policy</th>
           <th class="px-6 py-3 text-left">Institution</th>
           <th class="px-6 py-3 text-left">Beneficiary</th>
-          <th class="px-6 py-3 text-left">Last Updated</th>
+          <th class="px-6 py-3 text-left">
+            <a class="hover:underline" href="{{ url_for('assets', sort='last_updated', order=next) }}">Last Updated</a>
+          </th>
           <th class="px-6 py-3 text-right w-48">Actions</th>
         </tr>
       </thead>
@@ -42,8 +55,18 @@
           <td class="px-6 py-3">{{ a.country }}</td>
           <td class="px-6 py-3">{{ a.currency }}</td>
           <td class="px-6 py-3 text-right">
-            {% set val = a.current_value if a.current_value is not none else a.value %}
-            {% if val is not none %}{{ "{:,.2f}".format(val) }}{% else %}-{% endif %}
+            {# Base value in original currency #}
+            {% set base_val = a.current_value if a.current_value is not none else a.value %}
+            {% if base_val is not none %}
+              {{ "{:,.2f}".format(base_val) }} {{ a.currency }}
+            {% else %}-{% endif %}
+
+            {# USD equivalent if not already USD #}
+            {% if a.usd_value is not none and a.currency != 'USD' %}
+              <div class="text-xs text-gray-500">
+                ≈ ${{ "{:,.2f}".format(a.usd_value) }} USD
+              </div>
+            {% endif %}
           </td>
           <td class="px-6 py-3">
             {% if a.account_no %}

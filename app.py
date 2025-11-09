@@ -331,50 +331,7 @@ def home():
 
     return render_template("home.html", summary=summary, user_role=g.user_role, group_id=g.group_id)
 
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    summary_data = {"total_expenses": 0, "monthly_total": 0.0, "base_currency": "USD", "recent_expenses": []}
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        gf, gp = get_group_filter_clause(g.user_role, g.group_id)
 
-        cur.execute(f"SELECT COUNT(*) AS c FROM expenses WHERE activate=TRUE {gf};", gp)
-        summary_data["total_expenses"] = cur.fetchone()["c"]
-
-        cur.execute(f"""
-            SELECT COALESCE(SUM(amount),0) AS s
-            FROM expenses
-            WHERE activate=TRUE
-              AND date_incurred >= date_trunc('month', NOW()) {gf};
-        """, gp)
-        summary_data["monthly_total"] = float(cur.fetchone()["s"] or 0)
-
-        cur.execute("""
-            SELECT id, description, amount, currency, date_incurred
-            FROM expenses
-            WHERE activate=TRUE
-            ORDER BY date_incurred DESC
-            LIMIT 5;
-        """)
-        for r in cur.fetchall():
-            summary_data["recent_expenses"].append({
-                "id": r["id"],
-                "description": dec(r["description"]),
-                "amount": float(r["amount"]),
-                "currency": r["currency"],
-                "expense_date_fmt": r["date_incurred"].strftime("%Y-%m-%d") if r["date_incurred"] else "",
-            })
-    except Exception as e:
-        print(f"dashboard error: {e}", file=sys.stderr)
-    finally:
-        if conn:
-            try: cur.close()
-            except: pass
-            conn.close()
-    return render_template("dashboard.html", summary_data=summary_data)
 
 # -------------------------------------------------
 # Auth
@@ -1228,6 +1185,7 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

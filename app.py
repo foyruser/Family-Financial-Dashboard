@@ -43,6 +43,7 @@ class Encryptor:
         if data is None or data == '':
             return None
         try:
+            # data is encoded to bytes, encrypted, and then decoded to string for DB storage
             return self.f.encrypt(data.encode()).decode()
         except Exception as e:
             print(f"Encryption error: {e}", file=sys.stderr)
@@ -106,7 +107,7 @@ def send_email(subject, recipient, body):
 def send_password_reset_email(email, token):
     """Sends the actual password reset link."""
     reset_link = url_for('reset_password', token=token, _external=True)
-    subject = "Password Reset Request for Dream Bee Network"
+    subject = "Password Reset Request for Family Financial Dashboard"
     body = (
         f"You requested a password reset for your account ({email}).\n\n"
         f"Please click on the following link to reset your password within the next hour:\n"
@@ -573,17 +574,20 @@ def home():
         'total_asset_usd': 0.0,
         'total_expense_usd': 0.0,
         'net_worth_usd': 0.0,
-        'net_worth_inr': 'N/A',
+        'net_worth_inr': 'N/A', # Stays as string 'N/A' if conversion fails
         'assets_by_currency': {},
         'expenses_by_currency': {},
-        'reporting_currency': 'USD',
-        'secondary_currency': 'INR'
     }
     dashboard_data = default_dashboard_data
     
     conn = get_db_connection()
     if not conn:
-        flash("Database connection failure.", 'error'); return render_template('home.html', dashboard_data=dashboard_data)
+        flash("Database connection failure.", 'error')
+        # Pass default data to template to prevent crash
+        return render_template('home.html', 
+                               total_asset_usd=0.0, total_expense_usd=0.0, 
+                               net_worth_usd=0.0, net_worth_inr='N/A',
+                               dashboard_data=default_dashboard_data) 
 
     cur = conn.cursor(cursor_factory=RealDictCursor)
     group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
@@ -612,55 +616,65 @@ def home():
         
         if not rates:
             flash("Could not fetch live exchange rates. Displaying sums without conversion.", 'warning')
-            rates = {c: (1.0 if c == 'USD' else 0) for c in assets_by_currency.keys() | expenses_by_currency.keys()}
+            # Fallback rates: 1.0 for USD, 0 for others
+            rates = {c: (1.0 if c == 'USD' else 0) for c in assets_by_currency.keys() | expenses_by_currency.keys() | {'USD', 'INR'}}
 
         # Calculate Total Asset Value in USD
-        total_asset_usd = 0
+        total_asset_usd = 0.0
         for currency, value in assets_by_currency.items():
             rate = rates.get(currency, 0)
             if rate != 0:
                 if currency == 'USD':
                     total_asset_usd += value
                 else:
-                    # Conversion: Value_in_USD = Value_in_Currency / (Rate of USD to Currency)
-                    total_asset_usd += value / rate
+                    # Rerunning the logic based on standard API output (Rate = USD_TO_CURRENCY):
+                    # Value_in_USD = Value_in_Currency / Rate_from_USD_to_Currency
+                    total_asset_usd += value / rate # This is correct if API returns rate from USD
 
         # Calculate Total Expense Value in USD
-        total_expense_usd = 0
+        total_expense_usd = 0.0
         for currency, value in expenses_by_currency.items():
             rate = rates.get(currency, 0)
             if rate != 0:
-                if currency == 'USD':
-                    total_expense_usd += value
-                else:
-                    total_expense_usd += value / rate
+                total_expense_usd += value / rate
 
         
+        # Calculate Net Worth in USD
+        net_worth_usd = total_asset_usd - total_expense_usd
+
         # Convert total USD to INR for the secondary metric
         usd_rate = rates.get('USD', 1.0)
-        # Avoid division by zero if USD rate is somehow 0
+        # Assuming rates are from Base=USD. If so, rates.get('INR') is the USD->INR rate.
         usd_to_inr = rates.get('INR', 0) / usd_rate if usd_rate != 0 and rates.get('INR') else 0
+
+        net_worth_inr = round(net_worth_usd * usd_to_inr, 2) if usd_to_inr else 'N/A'
         
         dashboard_data = {
             'total_asset_usd': round(total_asset_usd, 2),
             'total_expense_usd': round(total_expense_usd, 2),
-            'net_worth_usd': round(total_asset_usd - total_expense_usd, 2),
-            'net_worth_inr': round((total_asset_usd - total_expense_usd) * usd_to_inr, 2) if usd_to_inr else 'N/A',
+            'net_worth_usd': round(net_worth_usd, 2),
+            'net_worth_inr': net_worth_inr,
             'assets_by_currency': assets_by_currency,
             'expenses_by_currency': expenses_by_currency,
-            'reporting_currency': 'USD',
-            'secondary_currency': 'INR'
         }
 
     except Exception as e:
         print(f"Dashboard calculation error: {e}", file=sys.stderr)
         flash("Error calculating financial summaries. Displaying zeros.", 'error')
-        # dashboard_data remains the default zeroed dictionary from initialization
+        # Use default_dashboard_data (all zeros)
+        
     finally:
         cur.close()
         conn.close()
 
-    return render_template('home.html', dashboard_data=dashboard_data)
+    # CRITICAL FIX: Pass individual variables which are guaranteed to be numeric (or 'N/A')
+    # Use .get() on dashboard_data to safely pull values, defaulting to 0 for numerics.
+    return render_template('home.html', 
+                           total_asset_usd=dashboard_data.get('total_asset_usd', 0.0),
+                           total_expense_usd=dashboard_data.get('total_expense_usd', 0.0),
+                           net_worth_usd=dashboard_data.get('net_worth_usd', 0.0),
+                           net_worth_inr=dashboard_data.get('net_worth_inr', 'N/A'),
+                           dashboard_data=dashboard_data)
 
 
 # --- ASSET CRUD ROUTES ---

@@ -569,112 +569,150 @@ def home():
     access_denied_response = check_user_access()
     if access_denied_response: return access_denied_response
     
-    # Initialize dashboard data with defaults to prevent template errors if any calculation fails
-    default_dashboard_data = {
-        'total_asset_usd': 0.0,
-        'total_expense_usd': 0.0,
-        'net_worth_usd': 0.0,
-        'net_worth_inr': 'N/A', # Stays as string 'N/A' if conversion fails
-        'assets_by_currency': {},
-        'expenses_by_currency': {},
-    }
-    dashboard_data = default_dashboard_data
+    # Initialize variables with defaults for safety
+    total_asset_usd = 0.0
+    total_expense_usd = 0.0
+    total_asset_inr = 'N/A'
+    total_expense_inr = 'N/A'
+    net_usd = 0.0
+    net_inr = 'N/A'
+    last_expenses = []
+    asset_breakdown = {}
     
     conn = get_db_connection()
     if not conn:
         flash("Database connection failure.", 'error')
-        # Pass default data to template to prevent crash
+        # Return initialized (zeroed) variables
         return render_template('home.html', 
-                               total_asset_usd=0.0, total_expense_usd=0.0, 
-                               net_worth_usd=0.0, net_worth_inr='N/A',
-                               dashboard_data=default_dashboard_data) 
+                               total_asset_usd=0.0, total_expense_usd=0.0, net_usd=0.0,
+                               total_asset_inr='N/A', total_expense_inr='N/A', net_inr='N/A',
+                               last_expenses=[], asset_breakdown={}) 
 
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
+    asset_filter, asset_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
     
-    # 1. Fetch all asset and expense sums grouped by currency for the user's group
     try:
+        # 1. Fetch all asset and expense sums grouped by currency for the user's group
         cur.execute(f"""
             SELECT currency, SUM(value) as total_value
             FROM assets 
-            WHERE activate = TRUE {group_filter} 
+            WHERE activate = TRUE {asset_filter} 
             GROUP BY currency;
-        """, group_params)
+        """, asset_params)
         assets_by_currency = {item['currency']: float(item['total_value'] or 0) for item in cur.fetchall()}
 
-        # Note the table name change in group_filter replacement for expenses
+        expense_filter_sql = asset_filter.replace('assets', 'expenses')
+        
         cur.execute(f"""
             SELECT currency, SUM(amount) as total_amount
             FROM expenses 
-            WHERE activate = TRUE {group_filter.replace('assets', 'expenses')} 
+            WHERE activate = TRUE {expense_filter_sql} 
             GROUP BY currency;
-        """, group_params)
+        """, asset_params)
         expenses_by_currency = {item['currency']: float(item['total_amount'] or 0) for item in cur.fetchall()}
         
         # 2. Get Exchange Rates (Base to USD for simplification)
         rates = get_exchange_rates('USD') 
         
         if not rates:
-            flash("Could not fetch live exchange rates. Displaying sums without conversion.", 'warning')
-            # Fallback rates: 1.0 for USD, 0 for others
-            rates = {c: (1.0 if c == 'USD' else 0) for c in assets_by_currency.keys() | expenses_by_currency.keys() | {'USD', 'INR'}}
+            flash("Could not fetch live exchange rates. Displaying metrics in USD only.", 'warning')
+            rates = {'USD': 1.0, 'INR': 0.0}
+
+        usd_rate = rates.get('USD', 1.0)
+        # Rate to convert USD value to INR value
+        usd_to_inr = rates.get('INR', 0) / usd_rate if usd_rate != 0 and rates.get('INR') else 0
+
+        # --- Currency Conversion and Summation ---
 
         # Calculate Total Asset Value in USD
-        total_asset_usd = 0.0
         for currency, value in assets_by_currency.items():
             rate = rates.get(currency, 0)
             if rate != 0:
-                if currency == 'USD':
-                    total_asset_usd += value
-                else:
-                    # Rerunning the logic based on standard API output (Rate = USD_TO_CURRENCY):
-                    # Value_in_USD = Value_in_Currency / Rate_from_USD_to_Currency
-                    total_asset_usd += value / rate # This is correct if API returns rate from USD
+                # Value_in_USD = Value_in_Currency / Rate_from_USD_to_Currency
+                total_asset_usd += value / rate 
 
         # Calculate Total Expense Value in USD
-        total_expense_usd = 0.0
         for currency, value in expenses_by_currency.items():
             rate = rates.get(currency, 0)
             if rate != 0:
                 total_expense_usd += value / rate
 
-        
         # Calculate Net Worth in USD
-        net_worth_usd = total_asset_usd - total_expense_usd
+        net_usd = total_asset_usd - total_expense_usd
 
-        # Convert total USD to INR for the secondary metric
-        usd_rate = rates.get('USD', 1.0)
-        # Assuming rates are from Base=USD. If so, rates.get('INR') is the USD->INR rate.
-        usd_to_inr = rates.get('INR', 0) / usd_rate if usd_rate != 0 and rates.get('INR') else 0
+        # Calculate INR equivalents
+        if usd_to_inr:
+            total_asset_inr = round(total_asset_usd * usd_to_inr, 2)
+            total_expense_inr = round(total_expense_usd * usd_to_inr, 2)
+            net_inr = round(net_usd * usd_to_inr, 2)
+        else:
+            total_asset_inr = 'N/A'
+            total_expense_inr = 'N/A'
+            net_inr = 'N/A'
+            # Warning already flashed above if rates were empty
 
-        net_worth_inr = round(net_worth_usd * usd_to_inr, 2) if usd_to_inr else 'N/A'
+        # --- Dashboard List Data ---
         
-        dashboard_data = {
-            'total_asset_usd': round(total_asset_usd, 2),
-            'total_expense_usd': round(total_expense_usd, 2),
-            'net_worth_usd': round(net_worth_usd, 2),
-            'net_worth_inr': net_worth_inr,
-            'assets_by_currency': assets_by_currency,
-            'expenses_by_currency': expenses_by_currency,
-        }
+        # Last 5 Expenses
+        expense_list_filter, expense_list_params = get_group_filter_clause(g.user_role, g.group_id, 'e')
+        cur.execute(f"""
+            SELECT e.expense_date, e.category, e.amount, e.currency, o.name AS owner_name, e.description 
+            FROM expenses e 
+            JOIN owners o ON e.owner_id = o.id
+            WHERE e.activate = TRUE {expense_list_filter} 
+            ORDER BY e.expense_date DESC
+            LIMIT 5;
+        """, expense_list_params)
+        
+        last_expenses = cur.fetchall()
+        # Decrypt descriptions
+        for expense in last_expenses:
+            expense['description'] = encryptor.decrypt(expense['description'])
+
+        # Asset Breakdown by Type (in USD)
+        asset_breakdown = {}
+        cur.execute(f"""
+            SELECT type, currency, SUM(value) as total_value
+            FROM assets 
+            WHERE activate = TRUE {asset_filter} 
+            GROUP BY type, currency;
+        """, asset_params)
+        
+        asset_sums = cur.fetchall()
+        for item in asset_sums:
+            currency = item['currency']
+            value = float(item['total_value'] or 0)
+            type = item['type']
+            
+            rate = rates.get(currency, 0)
+            # Convert to USD: Value_in_USD = Value_in_Currency / Rate_from_USD_to_Currency
+            usd_value = (value / rate) if rate != 0 and rate != 1.0 else (value if currency == 'USD' else 0)
+            
+            asset_breakdown[type] = asset_breakdown.get(type, 0) + usd_value
+        
+        # Round the final breakdown values
+        asset_breakdown = {k: round(v, 2) for k, v in asset_breakdown.items()}
+
 
     except Exception as e:
-        print(f"Dashboard calculation error: {e}", file=sys.stderr)
-        flash("Error calculating financial summaries. Displaying zeros.", 'error')
-        # Use default_dashboard_data (all zeros)
-        
+        print(f"Dashboard calculation/fetch error: {e}", file=sys.stderr)
+        flash("Error calculating financial summaries or retrieving lists.", 'error')
+        # Use initialized (zeroed/N/A) variables
+
     finally:
         cur.close()
         conn.close()
 
-    # CRITICAL FIX: Pass individual variables which are guaranteed to be numeric (or 'N/A')
-    # Use .get() on dashboard_data to safely pull values, defaulting to 0 for numerics.
+    # Pass all variables to the template using the new names
     return render_template('home.html', 
-                           total_asset_usd=dashboard_data.get('total_asset_usd', 0.0),
-                           total_expense_usd=dashboard_data.get('total_expense_usd', 0.0),
-                           net_worth_usd=dashboard_data.get('net_worth_usd', 0.0),
-                           net_worth_inr=dashboard_data.get('net_worth_inr', 'N/A'),
-                           dashboard_data=dashboard_data)
+                           total_asset_usd=round(total_asset_usd, 2),
+                           total_expense_usd=round(total_expense_usd, 2),
+                           net_usd=round(net_usd, 2),
+                           total_asset_inr=total_asset_inr,
+                           total_expense_inr=total_expense_inr,
+                           net_inr=net_inr,
+                           last_expenses=last_expenses,
+                           asset_breakdown=asset_breakdown)
 
 
 # --- ASSET CRUD ROUTES ---

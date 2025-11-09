@@ -3,7 +3,6 @@
 
 {% block content %}
 <div class="min-h-[60vh] p-4 sm:p-8">
-
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
       <div class="mb-6 space-y-2 max-w-4xl mx-auto">
@@ -52,6 +51,7 @@
         </h3>
         <p class="text-gray-600 mb-4 text-sm">A unique ID will be generated for you to share.</p>
         <form action="{{ url_for('create_group') }}" method="POST">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 px-4 rounded-lg">
             Create New Group
           </button>
@@ -65,6 +65,7 @@
         </h3>
         <p class="text-gray-600 mb-4 text-sm">Enter the Group ID shared by a family member.</p>
         <form action="{{ url_for('join_group') }}" method="POST">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <input type="text" id="target_group_id" name="target_group_id" required
                  placeholder="Enter Group ID (e.g., family-ab01c2)"
                  class="w-full p-2.5 mb-4 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500">

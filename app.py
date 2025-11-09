@@ -4,6 +4,7 @@ from flask_wtf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
+from flask import redirect, url_for
 
 import os
 import sys
@@ -23,6 +24,12 @@ from cryptography.fernet import Fernet
 # App & Config
 # -------------------------------------------------
 app = Flask(__name__)
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    return redirect(url_for("home"))
 
 # Secret keys (provide via Render env)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY", "a_long_random_fallback_key")
@@ -1221,5 +1228,6 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 

@@ -1,102 +1,120 @@
-{% extends "layout.html" %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Full Financial Summary</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f4f7f9;
+        }
+        .summary-card {
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+            transition: transform 0.3s ease-in-out;
+        }
+        .summary-card:hover {
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="mb-8">
+            <h1 class="text-4xl font-extrabold text-gray-800 mb-2">Full Financial Summary</h1>
+            <p class="text-gray-600">Total active Assets and Expenses across all time for your group, converted to both USD and INR.</p>
+        </header>
 
-{% block title %}Dashboard{% endblock %}
-
-{% block content %}
-<div class="space-y-10 p-4 sm:p-6 lg:p-8">
-
-    <h1 class="text-4xl font-extrabold text-gray-900">
-        Group Financial Dashboard
-    </h1>
-
-    <!-- SUMMARY CARDS: Assets, Expenses, Net Worth -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        
-        <!-- Total Assets Card -->
-        <div class="bg-white p-6 rounded-2xl shadow-xl border-l-4 border-indigo-500">
-            <p class="text-sm font-medium text-gray-500">Total Group Assets</p>
-            <p class="mt-1 text-3xl font-bold text-gray-900">${{ data.total_asset_value | round(2) | format_currency('USD') }}</p>
-            <a href="{{ url_for('index') }}" class="mt-3 inline-flex items-center text-sm font-semibold text-indigo-600 hover:text-indigo-800 transition duration-150">
-                View Asset Details
-            </a>
-        </div>
-
-        <!-- Monthly Expenses Card -->
-        <div class="bg-white p-6 rounded-2xl shadow-xl border-l-4 border-red-500">
-            <p class="text-sm font-medium text-gray-500">Last Month's Expenses</p>
-            <p class="mt-1 text-3xl font-bold text-red-600">${{ data.monthly_expenses | round(2) | format_currency('USD') }}</p>
-            <a href="{{ url_for('expenses') }}" class="mt-3 inline-flex items-center text-sm font-semibold text-red-600 hover:text-red-800 transition duration-150">
-                View Expense History
-            </a>
-        </div>
-
-        <!-- Net Worth Card (Simple Assets - Expenses) -->
-        {% set net_worth = data.total_asset_value - data.monthly_expenses %}
-        <div class="p-6 rounded-2xl shadow-xl border-l-4 
-            {% if net_worth >= 0 %} bg-green-50 border-green-500 {% else %} bg-red-50 border-red-500 {% endif %}">
-            <p class="text-sm font-medium text-gray-500">Simple Net Worth Estimate</p>
-            <p class="mt-1 text-3xl font-bold 
-                {% if net_worth >= 0 %} text-green-700 {% else %} text-red-700 {% endif %}">
-                ${{ net_worth | round(2) | format_currency('USD') }}
-            </p>
-            <p class="mt-3 text-sm text-gray-600">Assets minus last month's expenses.</p>
-        </div>
-    </div>
-    
-    <!-- DETAILED BREAKDOWN & RECENT ACTIVITY -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        <!-- Expense Breakdown (2/3 width on large screens) -->
-        <div class="lg:col-span-2 bg-white p-8 rounded-2xl shadow-xl space-y-6">
-            <h2 class="text-2xl font-semibold text-gray-800">Expense Breakdown</h2>
-            
-            <div class="space-y-4">
-                {% for item in data.expense_breakdown %}
-                {% set percentage = (item.amount / data.monthly_expenses) * 100 if data.monthly_expenses else 0 %}
-                <div class="flex items-center space-x-4">
-                    <div class="flex-grow">
-                        <div class="flex justify-between text-sm font-medium text-gray-700">
-                            <span>{{ item.category }}</span>
-                            <span>{{ percentage | round(1) }}%</span>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="mb-4">
+                    {% for category, message in messages %}
+                        <div class="p-3 mb-2 rounded-lg text-sm {% if category == 'error' %}bg-red-100 text-red-700{% elif category == 'success' %}bg-green-100 text-green-700{% else %}bg-blue-100 text-blue-700{% endif %}" role="alert">
+                            {{ message }}
                         </div>
-                        <div class="mt-1 w-full bg-gray-200 rounded-full h-2.5">
-                            <div class="bg-red-500 h-2.5 rounded-full" style="width: {{ percentage }}%"></div>
-                        </div>
-                    </div>
-                    <span class="text-sm font-semibold text-gray-900">${{ item.amount | round(2) | format_currency('USD') }}</span>
+                    {% endfor %}
                 </div>
-                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            <!-- Total Assets Card -->
+            <div class="summary-card bg-white p-6 rounded-xl border-t-4 border-green-500">
+                <p class="text-lg font-semibold text-gray-500 mb-1">Total Assets</p>
+                <p class="text-3xl font-bold text-green-600">
+                    ${{ "%.2f" | format(summary.total_assets_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
+                </p>
+                <p class="text-lg font-medium text-gray-700 mt-2">
+                    {% if summary.total_assets_inr != 'N/A' %}
+                        <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.total_assets_inr) }}
+                    {% else %}
+                        <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
+                    {% endif %}
+                </p>
+                <div class="text-xs text-gray-400 mt-3">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                    </svg>
+                    Sum of all active assets (USD basis).
+                </div>
             </div>
-            <a href="{{ url_for('add_expense') }}" class="block w-full text-center py-2 border border-dashed border-red-300 rounded-xl text-red-600 hover:bg-red-50 transition duration-150">
-                Record New Expense
+
+            <!-- Total Expenses Card -->
+            <div class="summary-card bg-white p-6 rounded-xl border-t-4 border-red-500">
+                <p class="text-lg font-semibold text-gray-500 mb-1">Total Expenses</p>
+                <p class="text-3xl font-bold text-red-600">
+                    ${{ "%.2f" | format(summary.total_expenses_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
+                </p>
+                <p class="text-lg font-medium text-gray-700 mt-2">
+                    {% if summary.total_expenses_inr != 'N/A' %}
+                        <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.total_expenses_inr) }}
+                    {% else %}
+                        <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
+                    {% endif %}
+                </p>
+                <div class="text-xs text-gray-400 mt-3">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M13 17h8m0 0V9m0 8l-8-8-4 4-6-6" />
+                    </svg>
+                    Sum of all active expenses (USD basis).
+                </div>
+            </div>
+
+            <!-- Net Balance Card -->
+            {% set net_color = 'green-600' if summary.net_balance_usd >= 0 else 'red-600' %}
+            {% set net_border = 'green-500' if summary.net_balance_usd >= 0 else 'red-500' %}
+            <div class="summary-card bg-white p-6 rounded-xl border-t-4 border-{{ net_border }}">
+                <p class="text-lg font-semibold text-gray-500 mb-1">Net Balance</p>
+                <p class="text-3xl font-bold text-{{ net_color }}">
+                    ${{ "%.2f" | format(summary.net_balance_usd) }} <span class="text-sm font-medium text-gray-500">USD</span>
+                </p>
+                <p class="text-lg font-medium text-gray-700 mt-2">
+                    {% if summary.net_balance_inr != 'N/A' %}
+                        <span class="text-sm font-semibold text-gray-500">INR:</span> ₹{{ "%.2f" | format(summary.net_balance_inr) }}
+                    {% else %}
+                        <span class="text-sm font-semibold text-gray-500">INR:</span> N/A (Rate Error)
+                    {% endif %}
+                </p>
+                <div class="text-xs text-gray-400 mt-3">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                    Total Assets minus Total Expenses.
+                </div>
+            </div>
+
+        </div>
+
+        <div class="mt-8">
+            <!-- Assumes an 'index' route exists for the main dashboard -->
+            <a href="{{ url_for('home') }}" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition duration-150 ease-in-out">
+                &larr; Back to Dashboard
             </a>
         </div>
         
-        <!-- Recent Activity (1/3 width on large screens) -->
-        <div class="lg:col-span-1 bg-white p-8 rounded-2xl shadow-xl space-y-6">
-            <h2 class="text-2xl font-semibold text-gray-800">Recent Group Activity</h2>
-            
-            <ul class="divide-y divide-gray-200">
-                {% for activity in data.recent_activity %}
-                <li class="py-3">
-                    <div class="flex items-center space-x-3">
-                        <span class="inline-flex items-center p-2 rounded-full 
-                            {% if 'Asset' in activity.type %} bg-indigo-100 text-indigo-800 {% else %} bg-red-100 text-red-800 {% endif %} 
-                            text-xs font-medium">
-                            {{ activity.type }}
-                        </span>
-                        <span class="text-sm text-gray-500">{{ activity.date }}</span>
-                    </div>
-                    <p class="mt-1 text-gray-900 font-medium">{{ activity.desc }}</p>
-                </li>
-                {% endfor %}
-            </ul>
-        </div>
     </div>
-</div>
-{% endblock %}
-
-<!-- Macro from index.html repeated here for completeness -->
-{% macro format_currency(value, currency) %}
-    {% if currency == 'USD' %}${{ value }}{% elif currency == 'INR' %}₹{{ value }}{% elif currency == 'EUR' %}€{{ value }}{% elif currency == 'GBP' %}£{{ value }}{% else %}{{ currency }} {{ value }}{% endif %}
-{% endmacro %}
+</body>
+</html>

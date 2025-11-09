@@ -46,17 +46,12 @@
             {% if val is not none %}{{ "{:,.2f}".format(val) }}{% else %}-{% endif %}
           </td>
           <td class="px-6 py-3">
-            {# Mask: show last 4 if present, else masked #}
             {% if a.account_no %}
               ****{{ a.account_no[-4:] if a.account_no|length > 4 else a.account_no }}
-            {% else %}
-              —
-            {% endif %}
+            {% else %}—{% endif %}
           </td>
           <td class="px-6 py-3">
-            {% if a.financial_institution %}
-              {{ a.financial_institution }}
-            {% else %}—{% endif %}
+            {% if a.financial_institution %}{{ a.financial_institution }}{% else %}—{% endif %}
           </td>
           <td class="px-6 py-3">
             {% if a.beneficiary_name %}{{ a.beneficiary_name }}{% else %}—{% endif %}
@@ -71,7 +66,9 @@
                 <i data-lucide="pencil" class="w-4 h-4 mr-1"></i>Edit
               </a>
               <form method="POST" action="{{ url_for('delete_asset', asset_id=a.id) }}" onsubmit="return confirmDelete(event, 'asset');">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                {% if csrf_token %}
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                {% endif %}
                 <button type="submit" class="px-3 py-1.5 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 inline-flex items-center">
                   <i data-lucide="trash-2" class="w-4 h-4 mr-1"></i>Delete
                 </button>

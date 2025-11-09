@@ -1,73 +1,47 @@
 {% extends "base.html" %}
-
-{% block title %}Edit Expense: {{ expense.description }}{% endblock %}
-{% block header_title %}Edit Expense Details{% endblock %}
-{% block header_subtitle %}Managing expense: <span class="font-mono text-red-600">{{ expense.description }} (ID: {{ expense.id }})</span>{% endblock %}
+{% block title %}Edit Expense{% endblock %}
+{% block header_title %}Edit Expense{% endblock %}
+{% block header_subtitle %}Update this transaction.{% endblock %}
 
 {% block content %}
 <div class="bg-white p-6 sm:p-10 rounded-xl shadow-2xl max-w-lg mx-auto">
-    {% set form_input_class = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 transition-shadow" %}
+  {% set form_input_class = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 transition-shadow" %}
+  <form method="POST" class="space-y-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-    <form method="POST" action="{{ url_for('edit_expense', expense_id=expense.id) }}" class="space-y-6">
-        
-        <div class="grid grid-cols-1 gap-6">
-            
-            <div>
-                <label for="description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                <input type="text" id="description" name="description" value="{{ expense.description }}" required class="{{ form_input_class }}" placeholder="e.g., Grocery trip">
-            </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+      <input type="text" name="description" required class="{{ form_input_class }}" value="{{ expense.description }}">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Amount</label>
+      <input type="number" step="0.01" name="amount" required class="{{ form_input_class }}" value="{{ expense.amount }}">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+      <select name="category" required class="{{ form_input_class }}">
+        {% for cat in categories %}
+        <option value="{{ cat }}" {% if cat == expense.category %}selected{% endif %}>{{ cat }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Currency</label>
+      <select name="currency" required class="{{ form_input_class }}">
+        {% for cur in currencies %}
+        <option value="{{ cur }}" {% if cur == expense.currency %}selected{% endif %}>{{ cur }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+      <input type="date" name="expense_date" required class="{{ form_input_class }}" value="{{ expense.expense_date }}">
+    </div>
 
-            <div>
-                <label for="amount" class="block text-sm font-medium text-gray-700 mb-1">Amount</label>
-                <input type="number" step="0.01" id="amount" name="amount" value="{{ expense.amount }}" required class="{{ form_input_class }}" placeholder="e.g., 55.75">
-            </div>
-
-            <div>
-                <label for="category" class="block text-sm font-medium text-gray-700 mb-1">Category</label>
-                <select id="category" name="category" required class="{{ form_input_class }}">
-                    <option value="" disabled>Select Category</option>
-                    {% for cat in categories %}
-                    <option value="{{ cat }}" {% if cat == expense.category %}selected{% endif %}>{{ cat }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-
-            <div>
-                <label for="currency" class="block text-sm font-medium text-gray-700 mb-1">Currency</label>
-                <select id="currency" name="currency" required class="{{ form_input_class }}">
-                    <option value="" disabled>Select Currency</option>
-                    {% for cur in currencies %}
-                    <option value="{{ cur }}" {% if cur == expense.currency %}selected{% endif %}>{{ cur }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            
-            <div>
-                <label for="expense_date" class="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                <input type="date" id="expense_date" name="expense_date" value="{{ expense.expense_date }}" required class="{{ form_input_class }}">
-            </div>
-        </div>
-
-        <div>
-            <label for="notes" class="block text-sm font-medium text-gray-700 mb-1">Notes (Optional)</label>
-            <textarea id="notes" name="notes" rows="3" class="{{ form_input_class }}" placeholder="Details about the transaction, who paid, etc.">{{ expense.notes | default('') }}</textarea>
-        </div>
-        
-        <div class="flex justify-between pt-4">
-            <a href="{{ url_for('expenses') }}" class="px-6 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors">Cancel</a>
-            <button type="submit" class="px-8 py-3 bg-red-600 text-white font-bold rounded-lg shadow-lg hover:bg-red-700 transition-colors transform hover:scale-105">
-                Update Expense Details
-            </button>
-        </div>
-    </form>
-</div>
-
-<div class="bg-red-50 p-6 sm:p-8 rounded-xl shadow-2xl border border-red-300 mt-8 max-w-lg mx-auto">
-    <h2 class="text-xl font-bold text-red-700 mb-4">Danger Zone: Delete Expense</h2>
-    <form action="{{ url_for('delete_expense', expense_id=expense.id) }}" method="POST" onsubmit="return confirm('Are you absolutely sure you want to delete the expense: {{ expense.description }}?');">
-        <button type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-md font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors">
-            Permanently Delete Expense
-        </button>
-    </form>
+    <div class="flex justify-between pt-4">
+      <a href="{{ url_for('expenses') }}" class="px-6 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300">← Back</a>
+      <button type="submit" class="px-8 py-3 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700">Save</button>
+    </div>
+  </form>
 </div>
 {% endblock %}

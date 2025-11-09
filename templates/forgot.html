@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Forgot Password</title>
+</head>
+<body>
+    <h1>Forgot Password</h1>
+    
+    {% if success %}
+        <p style="color: green;">{{ message }}</p>
+    {% elif message %}
+        <p style="color: red;">{{ message }}</p>
+    {% endif %}
+
+    {% if not success %}
+        <p>Enter your email to receive a password reset link.</p>
+        <form method="POST" action="{{ url_for('forgot_password') }}">
+            <label for="username">Email/Username:</label>
+            <input type="text" id="username" name="username" required><br>
+            <button type="submit">Request Reset Link</button>
+        </form>
+    {% endif %}
+
+    <p><a href="{{ url_for('login') }}">Back to Login</a></p>
+</body>
+</html>

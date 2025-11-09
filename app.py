@@ -262,7 +262,7 @@ def calculate_financial_summaries(cur, group_filter, group_params):
 
 # ... [Your existing /login, /logout, /register routes here] ...
 
-## NEW DASHBOARD ROUTE (/)
+## DASHBOARD ROUTE (/) - UPDATED TO PASS GROUP ID
 @app.route('/')
 @login_required 
 def home():
@@ -287,6 +287,9 @@ def home():
 
         # Merge the user data into the metrics dictionary for rendering
         data['user_name'] = g.user_name
+        # --- NEW LINE ADDED ---
+        data['group_id'] = g.group_id 
+        # ----------------------
 
         # The data dictionary keys match the variables expected by home.html
         return render_template('home.html', **data)
@@ -297,7 +300,7 @@ def home():
         return render_template('home.html', 
                                net_usd=0.0, total_asset_usd=0.0, total_expense_usd=0.0, 
                                last_expenses=[], asset_breakdown={}, net_inr='N/A', 
-                               total_asset_inr='N/A', total_expense_inr='N/A')
+                               total_asset_inr='N/A', total_expense_inr='N/A', group_id='N/A')
     finally:
         if conn: cur.close(); conn.close()
 

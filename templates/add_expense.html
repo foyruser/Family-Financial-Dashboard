@@ -1,106 +1,108 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <title>Add Expense - Dream Bee Network</title>
-  <style>
-    body {
-      background-image: url('https://images.unsplash.com/photo-1506744038136-46273834b3fb?ixlib=rb-4.0.3&auto=format&fit=crop&w=1950&q=80');
-      background-size: cover;
-      background-repeat: no-repeat;
-      background-attachment: fixed;
-      padding: 20px;
-      font-family: Arial, sans-serif;
-      color: #333;
-    }
-    h1 {
-      color: white;
-      text-shadow: 2px 2px 4px #000;
-      margin-bottom: 10px;
-    }
-    nav {
-      margin-bottom: 20px;
-    }
-    nav a {
-      background-color: #fff;
-      padding: 6px 12px;
-      border-radius: 4px;
-      text-decoration: none;
-      color: #333;
-      font-weight: bold;
-      margin-right: 10px;
-    }
-    form {
-      background-color: rgba(255,255,255,0.85);
-      padding: 15px;
-      border-radius: 8px;
-      max-width: 400px;
-    }
-    label {
-      display: block;
-      margin-top: 10px;
-      font-weight: bold;
-    }
-    input, select, textarea {
-      width: 100%;
-      padding: 6px;
-      margin-top: 4px;
-      box-sizing: border-box;
-    }
-    button {
-      margin-top: 15px;
-      padding: 10px 15px;
-      font-weight: bold;
-      cursor: pointer;
-    }
-    a.back-link {
-      display: inline-block;
-      margin-top: 15px;
-      color: black;
-      text-decoration: none;
-      background: white;
-      padding: 8px 12px;
-      border-radius: 4px;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add New Expense - Dream Bee Network</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Keeping font family here for consistency */
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+    </style>
 </head>
-<body>
-  <h1>Add New Expense</h1>
-  <nav>
-    <a href="/home">Home</a>
-    <a href="/">Assets</a>
-    <a href="/expenses">Expenses</a>
-  </nav>
-  <form method="POST">
-    <label>Description:
-      <input type="text" name="description" required>
-    </label>
-    <label>Category:
-      <select name="category" required>
-        <option value="" disabled selected>Select Category</option>
-        {% for cat in categories %}
-          <option value="{{ cat }}">{{ cat }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Amount:
-      <input type="number" step="0.01" name="amount" required>
-    </label>
-    <label>Currency:
-      <select name="currency" required>
-        <option value="" disabled selected>Select Currency</option>
-        {% for cur in currencies %}
-          <option value="{{ cur }}">{{ cur }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Date:
-      <input type="date" name="expense_date" required>
-    </label>
-    <label>Notes:
-      <textarea name="notes"></textarea>
-    </label>
-    <button type="submit">Add Expense</button>
-  </form>
-  <a href="/expenses" class="back-link">Back to Expenses</a>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-4xl mx-auto">
+
+        <header class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-gray-300">
+            <div class="mb-4 sm:mb-0">
+                <h1 class="text-3xl font-extrabold text-gray-800">Record New Expense</h1>
+                <p class="text-gray-500">Log a new family transaction or bill.</p>
+            </div>
+            <nav class="flex space-x-4 items-center">
+                <a href="{{ url_for('home') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Dashboard</a>
+                <a href="{{ url_for('index') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Assets</a>
+                <a href="{{ url_for('expenses') }}" class="px-4 py-2 bg-red-600 text-white font-semibold rounded-lg shadow-md">Expenses</a>
+                <a href="{{ url_for('change_password') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Change Password</a>
+                <a href="{{ url_for('logout') }}" class="ml-3 px-3 py-1 text-sm bg-red-100 text-red-700 font-semibold rounded-lg hover:bg-red-200 transition-colors shadow-sm">Logout</a>
+            </nav>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="mb-6 space-y-2">
+                {% for category, message in messages %}
+                    <div class="p-3 text-sm rounded-lg border 
+                        {% if category == 'success' %}bg-green-100 text-green-700 border-green-300
+                        {% elif category == 'error' %}bg-red-100 text-red-700 border-red-300
+                        {% elif category == 'warning' %}bg-amber-100 text-amber-700 border-amber-300
+                        {% endif %}">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        <div class="bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
+            {% set form_input_class = "w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 transition-shadow" %}
+
+            <form method="POST" class="space-y-6">
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    
+                    <div>
+                        <label for="description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                        <input type="text" id="description" name="description" required class="{{ form_input_class }}" placeholder="e.g., Grocery trip at Whole Foods">
+                    </div>
+
+                    <div>
+                        <label for="amount" class="block text-sm font-medium text-gray-700 mb-1">Amount</label>
+                        <input type="number" step="0.01" id="amount" name="amount" required class="{{ form_input_class }}" placeholder="e.g., 55.75">
+                    </div>
+
+                    <div>
+                        <label for="category" class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                        <select id="category" name="category" required class="{{ form_input_class }}">
+                            <option value="" disabled selected>Select Category</option>
+                            {% for cat in categories %}
+                            <option value="{{ cat }}">{{ cat }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div>
+                        <label for="currency" class="block text-sm font-medium text-gray-700 mb-1">Currency</label>
+                        <select id="currency" name="currency" required class="{{ form_input_class }}">
+                            <option value="" disabled selected>Select Currency</option>
+                            {% for cur in currencies %}
+                            <option value="{{ cur }}">{{ cur }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <label for="expense_date" class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                        <input type="date" id="expense_date" name="expense_date" required class="{{ form_input_class }}">
+                    </div>
+                </div>
+
+                <div>
+                    <label for="notes" class="block text-sm font-medium text-gray-700 mb-1">Notes (Optional)</label>
+                    <textarea id="notes" name="notes" rows="3" class="{{ form_input_class }}" placeholder="Details about the transaction, who paid, etc."></textarea>
+                </div>
+                
+                <div class="flex justify-between pt-4">
+                    <a href="{{ url_for('expenses') }}" class="px-6 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors">← Back to Expenses</a>
+                    <button type="submit" class="px-8 py-3 bg-red-600 text-white font-bold rounded-lg shadow-lg hover:bg-red-700 transition-colors transform hover:scale-105">
+                        Add Expense
+                    </button>
+                </div>
+            </form>
+        </div>
+        
+        <footer class="mt-10 pt-4 border-t border-gray-200 text-center text-sm text-gray-400">
+            Dream Bee Network &copy; 2024.
+        </footer>
+    </div>
 </body>
 </html>

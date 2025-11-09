@@ -18,13 +18,29 @@
             --text: #1f2937;
         }
         body { font-family: 'Inter', sans-serif; background-color: var(--background); color: var(--text); }
-        .btn-primary { background-color: var(--primary); color: white; transition: background-color 0.2s; }
+        .btn-primary { 
+            background-color: var(--primary); 
+            color: white; 
+            transition: background-color 0.2s; 
+            /* Ensure rounded corners */
+            border-radius: 0.5rem; 
+        }
         .btn-primary:hover { background-color: #4338ca; }
-        .card { background-color: var(--surface); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1); }
+        .card { 
+            background-color: var(--surface); 
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1); 
+            /* Ensure rounded corners */
+            border-radius: 0.75rem; 
+        }
         /* Active tab indicator */
         .active-tab {
             border-bottom: 3px solid var(--primary); 
             color: var(--primary);
+        }
+        /* Ensure all rounded corners for adaptive design */
+        input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="date"], select, textarea {
+            border-radius: 0.5rem;
+            border-color: #d1d5db;
         }
     </style>
 </head>
@@ -44,13 +60,14 @@
                 <nav class="flex items-center space-x-4">
                     {% set current_endpoint = request.endpoint %}
 
-                    {% if g.user and g.user.get('id') %}
+                    {% if g.user_id %} 
+                    {# Changed g.user and g.user.get('id') to g.user_id based on app.py #}
                         <!-- Desktop Tabs (Visible on screens >= sm) -->
                         <div class="hidden sm:flex space-x-2">
                             {% set nav_items = [
                                 ('Dashboard', 'home'),
-                                ('Assets', 'index'), 
                                 ('Expenses', 'expenses'), 
+                                ('Assets', 'assets'), 
                                 ('Reports', 'reports'), 
                                 ('Currencies', 'currencies'), 
                             ] %}
@@ -64,7 +81,8 @@
                             {% endfor %}
 
                             <!-- Admin-only Link -->
-                            {% if g.user.get('role') == 'admin' %}
+                            {% if g.user_role == 'Admin' %} 
+                            {# Changed g.user.get('role') to g.user_role #}
                             <a href="{{ url_for('users') }}" 
                                class="text-gray-600 hover:text-indigo-600 px-3 py-2 text-sm font-medium transition duration-150 rounded-md
                                {% if current_endpoint == 'users' %}active-tab font-semibold{% else %}hover:bg-gray-50{% endif %}">
@@ -76,7 +94,7 @@
                         <!-- User Info and Logout Button (Always visible if logged in) -->
                         <div class="flex items-center space-x-4">
                             <span class="text-sm text-gray-500 hidden lg:inline">Hello, 
-                                <strong class="text-gray-700">{{ g.user.get('username') or "User" }}</strong>
+                                <strong class="text-gray-700">{{ g.user_name or "User" }}</strong>
                             </span>
                             <a href="{{ url_for('logout') }}" class="px-4 py-2 rounded-lg btn-primary text-sm font-medium shadow-md">
                                 Logout
@@ -102,14 +120,14 @@
         <!-- Mobile Menu (Hidden by default) -->
         <div class="sm:hidden" id="mobile-menu" style="display: none;">
             <div class="px-2 pt-2 pb-3 space-y-1">
-                {% if g.user and g.user.get('id') %}
-                <span class="block px-3 py-2 text-sm font-medium text-gray-600">Logged in as: **{{ g.user.get('username') or "User" }}**</span>
+                {% if g.user_id %}
+                <span class="block px-3 py-2 text-sm font-medium text-gray-600">Logged in as: **{{ g.user_name or "User" }}**</span>
                 <a href="{{ url_for('home') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'home' %}bg-indigo-50 text-indigo-600{% endif %}">Dashboard</a>
-                <a href="{{ url_for('index') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'index' %}bg-indigo-50 text-indigo-600{% endif %}">Assets</a>
+                <a href="{{ url_for('assets') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'assets' %}bg-indigo-50 text-indigo-600{% endif %}">Assets</a>
                 <a href="{{ url_for('expenses') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'expenses' %}bg-indigo-50 text-indigo-600{% endif %}">Expenses</a>
                 <a href="{{ url_for('reports') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'reports' %}bg-indigo-50 text-indigo-600{% endif %}">Reports</a>
                 <a href="{{ url_for('currencies') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'currencies' %}bg-indigo-50 text-indigo-600{% endif %}">Currencies</a>
-                {% if g.user.get('role') == 'admin' %}
+                {% if g.user_role == 'Admin' %}
                 <a href="{{ url_for('users') }}" class="text-gray-700 hover:bg-gray-100 block px-3 py-2 rounded-md text-base font-medium {% if current_endpoint == 'users' %}bg-indigo-50 text-indigo-600{% endif %}">Users</a>
                 {% endif %}
                 <a href="{{ url_for('logout') }}" class="block w-full text-left px-3 py-2 mt-2 rounded-lg btn-primary text-base font-medium">Logout</a>
@@ -122,7 +140,7 @@
     </header>
 
     <!-- Flash Messages -->
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4 w-full">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}

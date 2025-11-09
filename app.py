@@ -4,7 +4,7 @@ from flask_wtf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
-from flask import redirect, url_for
+from flask_login import login_required
 
 import os
 import sys
@@ -1228,6 +1228,7 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

@@ -1,51 +1,66 @@
 {% extends "base.html" %}
 
-{% block title %}Assets Overview{% endblock %}
-{% block header_title %}Financial Assets{% endblock %}
-{% block header_subtitle %}Complete list of all recorded family assets and their current value.{% endblock %}
+{% block title %}Assets - Detailed Portfolio{% endblock %}
+{% block header_title %}Family Asset Portfolio{% endblock %}
+{% block header_subtitle %}Manage all financial and physical assets for the group. Total USD Value: <span class="text-blue-600 font-bold">${{ "{:,.2f}".format(total_asset_usd | default(0.0)) }}</span>{% endblock %}
 
 {% block content %}
-<div class="bg-white p-6 rounded-xl shadow-2xl">
-    <div class="flex justify-between items-center mb-6">
-        <h2 class="text-2xl font-bold text-gray-800">Assets ({{ assets | length }} Total)</h2>
-        <a href="{{ url_for('add_asset') }}" class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 transition-colors">
-            + Add New Asset
+<div class="space-y-6">
+    
+    <div class="flex justify-end">
+        <a href="{{ url_for('add_asset') }}" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 transition duration-150">
+            <svg class="w-5 h-5 mr-2 -ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            Add New Asset
         </a>
     </div>
 
-    {% if assets %}
-    <div class="overflow-x-auto">
-        <table class="min-w-full divide-y divide-gray-200 border border-gray-200 rounded-lg">
-            <thead>
-                <tr class="bg-gray-50">
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name / Account</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Owner</th>
-                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-                </tr>
-            </thead>
-            <tbody class="bg-white divide-y divide-gray-200">
-                {% for asset in assets %}
-                <tr class="hover:bg-blue-50 transition-colors">
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ asset.name }} 
-                        {% if asset.account_no %}<span class="text-xs text-gray-500 block">Acct: {{ asset.account_no }}</span>{% endif %}
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ asset.type }}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ asset.owner_name }}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-bold text-right text-green-600">{{ "{:,.2f}".format(asset.value) }} {{ asset.currency }}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <a href="{{ url_for('edit_asset', asset_id=asset.id) }}" class="text-blue-600 hover:text-blue-900">Edit Details</a>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+    <!-- Asset Listing Table -->
+    <div class="bg-white shadow-xl rounded-xl overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name/Description</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Original Amount (Local)</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">USD Value</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Owner</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acquisition Date</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    {% for asset in assets %}
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 truncate max-w-xs">{{ asset.description }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ asset.type }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            {{ asset.currency }} {{ "{:,.2f}".format(asset.amount | default(0.0)) }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600">
+                            ${{ "{:,.2f}".format(asset.usd_value | default(0.0)) }}
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ asset.owner_name }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ asset.acquisition_date | default('N/A') }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                            <a href="{{ url_for('edit_asset', asset_id=asset.id) }}" class="text-indigo-600 hover:text-indigo-900 mr-3">Edit</a>
+                            
+                            <!-- Delete Form (using POST method for safety) -->
+                            <form action="{{ url_for('delete_asset', asset_id=asset.id) }}" method="POST" class="inline" onsubmit="return confirm('Are you sure you want to permanently delete this asset?')">
+                                <button type="submit" class="text-red-600 hover:text-red-900">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="px-6 py-12 text-center text-lg text-gray-500">
+                            No assets have been recorded yet. Click "Add New Asset" to begin building your portfolio!
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
-    {% else %}
-    <div class="p-8 text-center bg-gray-50 rounded-lg border border-gray-200">
-        <p class="text-lg text-gray-600 font-medium">No assets recorded yet. Start by adding a new financial asset!</p>
-    </div>
-    {% endif %}
 </div>
 {% endblock %}

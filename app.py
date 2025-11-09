@@ -6,17 +6,21 @@ import requests
 import functools
 import os
 import sys
-# NEW: Import cryptography for field-level encryption
+# New: For field-level encryption
 from cryptography.fernet import Fernet
-
+# New: For password reset token generation and expiry
+import secrets
+from datetime import datetime, timedelta
+import smtplib # Used for the email stub function
 
 # --- APPLICATION INITIALIZATION & CONFIG ---
 app = Flask(__name__)
+# CRITICAL: SET FLASK_SECRET_KEY ENVIRONMENT VARIABLE FOR PRODUCTION
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'a_long_random_fallback_key') 
 bcrypt = Bcrypt(app)
 DATABASE_URL = os.environ.get('DATABASE_URL') 
 EXCHANGE_RATE_API_KEY = os.environ.get('EXCHANGE_RATE_API_KEY')
-# NEW: Fernet Encryption Key
+# CRITICAL: Fernet Encryption Key
 FERNET_KEY = os.environ.get('FERNET_KEY')
 
 # --- ENCRYPTOR IMPLEMENTATION ---
@@ -29,12 +33,14 @@ class Encryptor:
     def encrypt(self, data):
         if data is None or data == '':
             return None
+        # data is encoded to bytes, encrypted, and then decoded to string for DB storage
         return self.f.encrypt(str(data).encode()).decode()
 
     def decrypt(self, data):
         if data is None or data == '':
             return ''
         try:
+            # data is encoded to bytes, decrypted, and then decoded to string
             return self.f.decrypt(data.encode()).decode()
         except Exception:
             # Handle non-encrypted data or bad keys gracefully
@@ -55,13 +61,13 @@ def decrypt_data(data):
     """Decrypts data if ENCRYPTOR is available."""
     if ENCRYPTOR:
         return ENCRYPTOR.decrypt(data)
-    return data # Return as is if encryption is disabled
+    return data 
 
 def encrypt_data(data):
     """Encrypts data if ENCRYPTOR is available."""
     if ENCRYPTOR:
         return ENCRYPTOR.encrypt(data)
-    return data # Return as is if encryption is disabled
+    return data
 
 # --- CONNECTION HELPER FUNCTIONS ---
 
@@ -99,7 +105,8 @@ def get_db_connection():
         print(f"Database connection failed: {e}", file=sys.stderr)
         raise ConnectionError(f"Failed to connect to database: {e}")
 
-# --- SECURITY & RBAC HELPERS (omitted for brevity, assume they are the same) ---
+# --- SECURITY & RBAC HELPERS ---
+
 def get_user_info(user_id):
     """Fetches role and group_id."""
     if not user_id: return None, None
@@ -138,6 +145,7 @@ def check_user_access():
     return None
 
 def login_required(view):
+    """Decorator for authentication check."""
     @functools.wraps(view)
     def wrapped_view(**kwargs):
         if 'user_id' not in session:
@@ -146,6 +154,7 @@ def login_required(view):
     return wrapped_view
 
 def admin_required(view):
+    """Decorator for admin role check (for management tasks only)."""
     @functools.wraps(view)
     def wrapped_view(**kwargs):
         if get_user_info(session.get('user_id'))[0] != 'admin':
@@ -172,7 +181,6 @@ def get_asset_type_distribution():
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
-        # NOTE: Type is not encrypted as it's used for grouping/filtering.
         query = f"""
             SELECT type, SUM(value) as total_value
             FROM assets
@@ -188,7 +196,28 @@ def get_asset_type_distribution():
         if conn: conn.close()
 
 
-# --- AUTH ROUTES (omitted for brevity) ---
+# --- DECRYPTION UTILITIES ---
+def decrypt_asset_fields(asset):
+    """Utility to decrypt all sensitive asset fields."""
+    asset['name'] = decrypt_data(asset['name'])
+    asset['account_no'] = decrypt_data(asset['account_no'])
+    asset['notes'] = decrypt_data(asset['notes'])
+    asset['financial_institution'] = decrypt_data(asset['financial_institution'])
+    asset['beneficiary_name'] = decrypt_data(asset['beneficiary_name'])
+    asset['policy_or_plan_type'] = decrypt_data(asset['policy_or_plan_type'])
+    asset['contact_phone'] = decrypt_data(asset['contact_phone'])
+    asset['document_location'] = decrypt_data(asset['document_location'])
+    asset['investment_strategy'] = decrypt_data(asset['investment_strategy'])
+    return asset
+
+def decrypt_expense_fields(expense):
+    """Utility to decrypt all sensitive expense fields."""
+    expense['description'] = decrypt_data(expense['description'])
+    expense['notes'] = decrypt_data(expense['notes'])
+    return expense
+
+# --- AUTH ROUTES ---
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -197,8 +226,9 @@ def register():
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute('INSERT INTO users (username, password_hash, role, group_id) VALUES (%s, %s, %s, %s) RETURNING id;', 
-                        (username, password_hash, 'pending', 'pending-group'))
+            # Assuming 'username' is used for email/login
+            cur.execute('INSERT INTO users (username, email, password_hash, role, group_id) VALUES (%s, %s, %s, %s, %s) RETURNING id;', 
+                        (username, username, password_hash, 'pending', 'pending-group'))
             session['user_id'], session['username'] = cur.fetchone()[0], username
             conn.commit()
             return redirect(url_for('pending_approval')) 
@@ -248,12 +278,14 @@ def admin_approve_users():
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
+
         if request.method == 'POST':
             user_id_to_approve, new_group_id = request.form.get('user_id'), request.form.get('group_id')
             if user_id_to_approve and new_group_id:
                 cur.execute('UPDATE users SET role = %s, group_id = %s WHERE id = %s AND role = %s;', 
                             ('user', new_group_id, user_id_to_approve, 'pending'))
                 conn.commit()
+
         cur.execute("SELECT id, username FROM users WHERE role = 'pending' ORDER BY id;")
         return render_template('admin_approve_users.html', pending_users=cur.fetchall())
     except Exception as e:
@@ -262,27 +294,163 @@ def admin_approve_users():
     finally:
         if conn: conn.close()
 
-# --- PROTECTED APPLICATION ROUTES (MODIFIED FOR ENCRYPTION) ---
 
-def decrypt_asset_fields(asset):
-    """Utility to decrypt all sensitive asset fields."""
-    asset['name'] = decrypt_data(asset['name'])
-    asset['account_no'] = decrypt_data(asset['account_no'])
-    asset['notes'] = decrypt_data(asset['notes'])
-    asset['financial_institution'] = decrypt_data(asset['financial_institution'])
-    asset['beneficiary_name'] = decrypt_data(asset['beneficiary_name'])
-    asset['policy_or_plan_type'] = decrypt_data(asset['policy_or_plan_type'])
-    asset['contact_phone'] = decrypt_data(asset['contact_phone'])
-    asset['document_location'] = decrypt_data(asset['document_location'])
-    asset['investment_strategy'] = decrypt_data(asset['investment_strategy'])
-    return asset
+# --- PASSWORD RESET & CHANGE LOGIC ---
 
-def decrypt_expense_fields(expense):
-    """Utility to decrypt all sensitive expense fields."""
-    expense['description'] = decrypt_data(expense['description'])
-    expense['notes'] = decrypt_data(expense['notes'])
-    return expense
+def generate_reset_token(user_id, cur):
+    """Generates a secure token, saves it to the DB, and sets a 1-hour expiry."""
+    token = secrets.token_urlsafe(32)
+    expiry = datetime.now() + timedelta(hours=1)
+    
+    cur.execute(
+        "UPDATE users SET reset_token = %s, token_expiration = %s WHERE id = %s;",
+        (token, expiry, user_id)
+    )
+    return token
 
+def send_password_reset_email(email, token):
+    """
+    *** STUB: IMPLEMENTATION REQUIRED ***
+    
+    In a production application, this must use a service like SendGrid, 
+    Mailgun, or Python's smtplib to send a real email containing the 
+    reset link: {{ url_for('reset_password', token=token, _external=True) }}
+    """
+    reset_link = url_for('reset_password', token=token, _external=True)
+    print(f"STUB: Password reset link for {email}: {reset_link}", file=sys.stderr) 
+    # Placeholder for actual email sending logic
+    pass
+
+@app.route('/change_password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    access_denied_response = check_user_access()
+    if access_denied_response: return access_denied_response
+
+    message = None
+    if request.method == 'POST':
+        old_password = request.form.get('old_password')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+        user_id = session['user_id']
+        conn = None
+
+        if new_password != confirm_password:
+            message = "New password and confirmation do not match."
+            return render_template('change_password.html', message=message, is_error=True)
+
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT password_hash FROM users WHERE id = %s;', (user_id,))
+            user = cur.fetchone()
+            
+            if user and bcrypt.check_password_hash(user[0], old_password):
+                new_password_hash = bcrypt.generate_password_hash(new_password).decode('utf-8')
+                cur.execute('UPDATE users SET password_hash = %s WHERE id = %s;', 
+                            (new_password_hash, user_id))
+                conn.commit()
+                message = "Your password has been successfully changed."
+                return render_template('change_password.html', message=message, is_error=False)
+            else:
+                message = "The current password you entered is incorrect."
+                return render_template('change_password.html', message=message, is_error=True)
+
+        except Exception as e:
+            if conn: conn.rollback()
+            print(f"Password change error: {e}", file=sys.stderr)
+            message = "An unexpected error occurred during password change."
+            return render_template('change_password.html', message=message, is_error=True)
+        finally:
+            if conn: conn.close()
+
+    return render_template('change_password.html', message=message, is_error=None)
+
+
+@app.route('/forgot', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        user_email = request.form.get('username') 
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Find the user by their username (which is assumed to be the email)
+            cur.execute('SELECT id, username FROM users WHERE username = %s;', (user_email,))
+            user = cur.fetchone()
+
+            if user:
+                user_id, username = user[0], user[1]
+                token = generate_reset_token(user_id, cur)
+                conn.commit()
+                
+                send_password_reset_email(username, token)
+            
+            # Security measure: always return a success message to prevent username enumeration
+            return render_template('forgot.html', 
+                message="A password reset link has been sent to your email (if the account exists).", 
+                success=True
+            )
+        except Exception as e:
+            if conn: conn.rollback()
+            return render_template('forgot.html', message=f"An error occurred: {e}", success=False)
+        finally:
+            if conn: conn.close()
+            
+    return render_template('forgot.html', message=None, success=None)
+
+
+@app.route('/reset/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1. Verify token existence and expiry
+        # Note: NOW() uses the database server's time
+        cur.execute(
+            "SELECT id FROM users WHERE reset_token = %s AND token_expiration > NOW();",
+            (token,)
+        )
+        user = cur.fetchone()
+
+        if not user:
+            return render_template('reset.html', 
+                message="Invalid or expired reset token. Please request a new one.", 
+                invalid=True
+            ), 400
+
+        user_id = user[0]
+        
+        if request.method == 'POST':
+            new_password = request.form.get('new_password')
+            confirm_password = request.form.get('confirm_password')
+
+            if new_password != confirm_password:
+                return render_template('reset.html', token=token, message="Passwords do not match.", invalid=False)
+            
+            # 2. Update password and clear token/expiry
+            new_password_hash = bcrypt.generate_password_hash(new_password).decode('utf-8')
+            cur.execute(
+                "UPDATE users SET password_hash = %s, reset_token = NULL, token_expiration = NULL WHERE id = %s;",
+                (new_password_hash, user_id)
+            )
+            conn.commit()
+            return render_template('login.html', message="Password successfully reset. You can now log in.")
+
+        # GET request: Render the form
+        return render_template('reset.html', token=token, message=None, invalid=False)
+
+    except Exception as e:
+        if conn: conn.rollback()
+        return f"An unexpected error occurred: {e}", 500
+    finally:
+        if conn: conn.close()
+
+
+# --- PROTECTED APPLICATION ROUTES (STRICTLY GROUP FILTERED AND ENCRYPTED) ---
 
 @app.route('/home')
 @login_required
@@ -299,9 +467,12 @@ def home():
         cur = conn.cursor(cursor_factory=RealDictCursor)
         asset_query = f'SELECT a.* FROM assets a JOIN owners o ON a.owner_id = o.id WHERE a.activate = TRUE {group_filter_a};'
         cur.execute(asset_query, group_params_a)
+        # Decrypt asset fields
         assets = [decrypt_asset_fields(a) for a in cur.fetchall()]
+        
         expense_query = f'SELECT e.* FROM expenses e JOIN owners o ON e.owner_id = o.id WHERE e.activate = TRUE {group_filter_e};'
         cur.execute(expense_query, group_params_e)
+        # Decrypt expense fields
         expenses = [decrypt_expense_fields(e) for e in cur.fetchall()]
     except ConnectionError: return "Database Connection Error.", 500
     finally:
@@ -310,7 +481,8 @@ def home():
     rates = get_exchange_rates()
     for item in assets + expenses:
         cur_currency = item['currency']
-        value = float(item.get('value', item.get('amount', 0.00)))
+        # Note: value/amount fields are NOT encrypted
+        value = float(item.get('value', item.get('amount', 0.00))) 
         rate_to_usd = rates.get(cur_currency, 0)
         value_usd = value if cur_currency == 'USD' else round(value / rate_to_usd, 2) if rate_to_usd else 0
         if item.get('value') is not None: total_asset_usd += value_usd
@@ -374,7 +546,6 @@ def add_asset():
     access_denied_response = check_user_access()
     if access_denied_response: return access_denied_response
 
-    # Form fields retrieval for GET (omitted for brevity)
     conn = None
     try:
         conn = get_db_connection()
@@ -431,7 +602,6 @@ def edit_asset(asset_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        # Form field lists fetch (omitted for brevity)
         cur.execute('SELECT type_name FROM asset_types ORDER BY type_name;'); asset_types = [row['type_name'] for row in cur.fetchall()]
         cur.execute('SELECT country_name FROM countries ORDER BY country_name;'); countries = [row['country_name'] for row in cur.fetchall()]
         cur.execute('SELECT currency_code FROM currencies ORDER BY currency_code;'); currencies = [row['currency_code'] for row in cur.fetchall()]

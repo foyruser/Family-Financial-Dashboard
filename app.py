@@ -397,16 +397,22 @@ def register():
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id;
             """, (username, email, phash, role, None, False))
-            uid = cur2.fetchone()["id"] if isinstance(cur2.fetchone(), dict) else cur2.fetchone()
-            # The above could be None due to cursor factory; use a new fetch:
+            new_id_row = cur2.fetchone()
             conn.commit()
 
-            # Store to session using a second query to be safe
-            cur.execute("SELECT id FROM users WHERE lower(username)=lower(%s);", (username,))
-            row = cur.fetchone()
-            session["user_id"] = row["id"] if isinstance(row, dict) else row[0]
+            # store session
+            new_id = new_id_row["id"] if isinstance(new_id_row, dict) else new_id_row[0]
+            session["user_id"] = new_id
             session["username"] = username
+
+            # 🔔 notify admins (best-effort; do not block flow)
+            try:
+                notify_admin_new_user(username=username, email=email)
+            except Exception as e:
+                print(f"notify_admin_new_user error: {e}", file=sys.stderr)
+
             return redirect(url_for("pending_approval"))
+
         except psycopg2.IntegrityError:
             flash("That username already exists.", "error")
         except Exception as e:
@@ -418,6 +424,7 @@ def register():
                 except: pass
                 conn.close()
     return render_template("register.html")
+
 
 @app.route("/pending_approval")
 @auth_required
@@ -1086,6 +1093,38 @@ def delete_asset(asset_id):
             conn.close()
     return redirect(url_for("assets"))
 
+# comma-separated list of admin emails to notify
+ADMIN_NOTIFY_EMAILS = [
+    e.strip() for e in os.environ.get("ADMIN_NOTIFY_EMAILS", "").split(",")
+    if e.strip()
+]
+
+def notify_admin_new_user(username: str, email: str | None):
+    """Email all admins when a new user registers."""
+    if not ADMIN_NOTIFY_EMAILS:
+        return  # nothing to do
+
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+    ua = request.headers.get("User-Agent", "unknown")
+    when = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+
+    subject = f"[Family Finance] New user registration: {username}"
+    html = f"""
+        <h2>New User Registration</h2>
+        <p><strong>Username:</strong> {username}</p>
+        <p><strong>Email:</strong> {email or username}</p>
+        <p><strong>When (UTC):</strong> {when}</p>
+        <p><strong>IP:</strong> {ip}</p>
+        <p><strong>User-Agent:</strong> {ua}</p>
+        <hr>
+        <p>This user is pending approval. You can approve and assign a group in the Admin page.</p>
+    """
+    for admin_addr in ADMIN_NOTIFY_EMAILS:
+        try:
+            send_email(admin_addr, subject, html)
+        except Exception as e:
+            print(f"admin notify failed to {admin_addr}: {e}", file=sys.stderr)
+
 # -------------------------------------------------
 # Dev helper: init_db (optional, dangerous in prod)
 # -------------------------------------------------
@@ -1199,3 +1238,4 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+

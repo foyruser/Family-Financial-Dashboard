@@ -552,7 +552,8 @@ def login():
             cur.execute('SELECT id, password FROM users WHERE username = %s;', (username,))
             user = cur.fetchone()
             
-            if user and bcrypt.check_password_hash(user['password'], password):
+            # CRITICAL FIX: Ensure user exists AND the password field is not NULL before checking the hash
+            if user and user.get('password') and bcrypt.check_password_hash(user['password'], password):
                 session['user_id'] = user['id']
                 flash('Login successful!', 'success')
                 return redirect(url_for('home'))

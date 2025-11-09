@@ -1,287 +1,334 @@
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash
 from flask_bcrypt import Bcrypt
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import requests
-import functools
+from flask_wtf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
+
 import os
 import sys
-from cryptography.fernet import Fernet
+import functools
 import secrets
-from datetime import datetime, timedelta
 import smtplib
+import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from email.message import EmailMessage
+from datetime import datetime, timedelta
 from urllib.parse import urljoin
 
+from cryptography.fernet import Fernet
+
 # -------------------------------------------------
-# App Setup & Config
+# App & Config
 # -------------------------------------------------
 app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY') or os.environ.get('SECRET_KEY', 'a_long_random_fallback_key')
+
+# Secret keys (provide via Render env)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY", "a_long_random_fallback_key")
+
+# Secure cookies in prod
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "true").lower() == "true",
+)
+
+# Respect proxy headers for real client IP
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 bcrypt = Bcrypt(app)
-DATABASE_URL = os.environ.get('DATABASE_URL')
+csrf = CSRFProtect(app)
 
-# Exchange rate api (optional)
-EXCHANGE_RATE_API_KEY = os.environ.get('EXCHANGE_RATE_API_KEY', 'YOUR_API_KEY_HERE')
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],  # sensible defaults
+)
 
-# Encryption key
-FERNET_KEY = os.environ.get('FERNET_KEY', Fernet.generate_key().decode())
+DATABASE_URL = os.environ.get("DATABASE_URL")
+EXCHANGE_RATE_API_KEY = os.environ.get("EXCHANGE_RATE_API_KEY", "")
+FERNET_KEY = os.environ.get("FERNET_KEY")  # must be stable in prod
 
-# SMTP config (Render env)
-MAIL_SERVER = os.environ.get('MAIL_SERVER')
-MAIL_PORT = int(os.environ.get('MAIL_PORT', '587'))
-MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
-MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
-MAIL_USE_TLS = (os.environ.get('MAIL_USE_TLS', 'True').lower() == 'true')
-MAIL_SENDER = os.environ.get('MAIL_SENDER', MAIL_USERNAME or 'no-reply@example.com')
+MAIL_SERVER = os.environ.get("MAIL_SERVER")
+MAIL_PORT = int(os.environ.get("MAIL_PORT", "587"))
+MAIL_USERNAME = os.environ.get("MAIL_USERNAME")
+MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
+MAIL_USE_TLS = (os.environ.get("MAIL_USE_TLS", "true").lower() == "true")
+MAIL_SENDER = os.environ.get("MAIL_SENDER", MAIL_USERNAME or "no-reply@example.com")
 
 # -------------------------------------------------
-# Encryptor
+# Encryption helper
 # -------------------------------------------------
 class Encryptor:
-    def __init__(self, key):
+    def __init__(self, key: str | None):
         if not key:
-            print("WARNING: FERNET_KEY not set. Using fallback key. DO NOT use in production.", file=sys.stderr)
+            print("WARNING: FERNET_KEY not set; generating ephemeral key (NOT for production).", file=sys.stderr)
             key = Fernet.generate_key().decode()
         self.f = Fernet(key.encode())
 
     def encrypt(self, data):
-        if data is None or data == '': 
+        if data is None or data == "":
             return None
         return self.f.encrypt(str(data).encode()).decode()
 
     def decrypt(self, data):
-        if data is None or data == '':
-            return ''
+        if data is None or data == "":
+            return ""
         try:
             return self.f.decrypt(data.encode()).decode()
         except Exception:
-            # Avoid breaking the UI on corrupt legacy values
-            print(f"Decryption failed for value (truncated): {str(data)[:20]}...", file=sys.stderr)
-            return '[Decryption Error]'
+            # caller decides what to do; we don't spam logs here
+            return "[unreadable]"
 
 encryptor = Encryptor(FERNET_KEY)
 
+def looks_encrypted(value: str) -> bool:
+    """Heuristic to avoid decrypting legacy plaintext."""
+    if not isinstance(value, str):
+        return False
+    if len(value) < 60:
+        return False
+    if not value.startswith("gAAAA"):
+        return False
+    return True
+
+def enc(v):
+    return encryptor.encrypt(v) if v not in (None, "") else None
+
+def dec(v):
+    if v in (None, ""):
+        return ""
+    s = str(v)
+    if looks_encrypted(s):
+        out = encryptor.decrypt(s)
+        # If unreadable token, keep placeholder
+        return out if out != "[unreadable]" else "[unreadable]"
+    # legacy plaintext kept as-is
+    return s
+
 # -------------------------------------------------
-# DB Helpers
+# Template helpers
+# -------------------------------------------------
+@app.context_processor
+def inject_csrf_token():
+    try:
+        from flask_wtf.csrf import generate_csrf
+        return dict(csrf_token=generate_csrf)
+    except Exception:
+        return dict(csrf_token=None)
+
+# -------------------------------------------------
+# DB helpers
 # -------------------------------------------------
 def get_db_connection():
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL environment variable is not set.")
+        raise RuntimeError("DATABASE_URL is not set")
     return psycopg2.connect(DATABASE_URL)
 
 def login_required(view):
     @functools.wraps(view)
     def wrapped_view(**kwargs):
-        if 'user_id' not in session:
-            flash('Please log in to access this page.', 'info')
-            return redirect(url_for('login'))
+        if "user_id" not in session:
+            flash("Please log in to access this page.", "info")
+            return redirect(url_for("login"))
         return view(**kwargs)
     return wrapped_view
 
 def admin_required(view):
     @functools.wraps(view)
     def wrapped_view(**kwargs):
-        if 'user_id' not in session:
-            flash('Please log in.', 'info')
-            return redirect(url_for('login'))
-        if g.user_role != 'Admin':
-            flash('Admin access required.', 'error')
-            return redirect(url_for('home'))
+        if "user_id" not in session:
+            flash("Please log in.", "info")
+            return redirect(url_for("login"))
+        if g.user_role != "Admin":
+            flash("Admin access required.", "error")
+            return redirect(url_for("home"))
         return view(**kwargs)
     return wrapped_view
 
-def get_group_filter_clause(user_role, group_id, table_alias=''):
-    if table_alias and not table_alias.endswith('.'):
-        table_alias += '.'
-    if user_role == 'Admin':
-        return '', ()
-    elif group_id is not None:
-        return f'AND {table_alias}group_id = %s', (group_id,)
-    else:
-        return 'AND 1=0', ()
+def get_group_filter_clause(user_role, group_id, table_alias=""):
+    if table_alias and not table_alias.endswith("."):
+        table_alias += "."
+    if user_role == "Admin":
+        return "", ()
+    if group_id:
+        return f"AND {table_alias}group_id = %s", (group_id,)
+    return "AND 1=0", ()
 
 # -------------------------------------------------
 # User Context
 # -------------------------------------------------
 @app.before_request
 def load_logged_in_user():
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
     g.user_id = None
     g.user_role = None
     g.group_id = None
     g.username = None
-    g.user_name = None  # keep for templates using g.user_name
+    g.user_name = None  # for older templates
 
-    if user_id is not None:
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            # Use username (not user_name)
-            cur.execute("SELECT username, email, user_role, group_id, activate FROM users WHERE id = %s;", (user_id,))
-            user = cur.fetchone()
-            if user:
-                if not user['activate']:
-                    # If not activated yet, force pending screen
-                    session['username'] = user['username']
-                    return
-                g.user_id = user_id
-                g.user_role = user['user_role']
-                g.group_id = user['group_id']
-                g.username = user['username']
-                g.user_name = user['username']
-            else:
-                session.clear()
-        except Exception as e:
-            print(f"Database error in before_request: {e}", file=sys.stderr)
-        finally:
-            if conn: 
-                try: cur.close()
-                except: pass
-                conn.close()
-
-# -------------------------------------------------
-# Currency Helpers
-# -------------------------------------------------
-def get_exchange_rate(from_currency, to_currency='USD'):
-    if EXCHANGE_RATE_API_KEY and EXCHANGE_RATE_API_KEY != 'YOUR_API_KEY_HERE':
-        try:
-            url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            if data.get('result') == 'success':
-                return data['conversion_rates'].get(to_currency, 1.0)
-        except Exception as e:
-            print(f"Exchange Rate API failed: {e}", file=sys.stderr)
-    return 1.0
-
-def convert_to_usd(amount, currency):
-    if currency == 'USD':
-        return float(amount)
-    rate_to_usd = get_exchange_rate(currency, 'USD')
-    return float(amount) / rate_to_usd if rate_to_usd else 0.0
-
-# -------------------------------------------------
-# Common Lists for Forms
-# -------------------------------------------------
-def get_common_lists():
-    return {
-        'currencies': ['USD', 'EUR', 'INR', 'GBP', 'JPY', 'CAD'],
-        'expense_categories': ['Travel', 'Food', 'Utilities', 'Software', 'Salary', 'Misc'],
-        'asset_types': ['Bank Account', 'Brokerage', 'Mutual Fund', 'Stock', 'Bond', 'Insurance', 'Real Estate', 'Crypto', 'Other'],
-        'countries': ['USA', 'India', 'UK', 'Canada', 'Germany', 'Japan', 'Australia'],
-        # For owner dropdowns; you can later fetch these from DB if you maintain an owners table
-        'owners': [{'id': 1, 'name': 'Primary'}, {'id': 2, 'name': 'Spouse'}, {'id': 3, 'name': 'Child'}],
-    }
-
-# -------------------------------------------------
-# Home / Dashboard
-# -------------------------------------------------
-@app.route('/')
-@login_required
-def home():
-    # Build summary (USD totals with INR display)
-    summary = {
-        'total_assets_usd': 0.0,
-        'total_expenses_usd': 0.0,
-        'total_assets_inr': 'N/A',
-        'total_expenses_inr': 'N/A',
-        'net_balance_usd': 0.0,
-        'net_balance_inr': 'N/A',
-    }
+    if user_id is None:
+        return
 
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        usd_to_inr_rate = get_exchange_rate('USD', 'INR')
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id)
-
-        # assets: use your assets table with 'current_value' if present; fallback to 'value'
-        cur.execute(f"""
-            SELECT COALESCE(current_value, value) AS amount, currency 
-            FROM assets WHERE activate = TRUE {group_filter};
-        """, group_params)
-        assets = cur.fetchall()
-
-        cur.execute(f"""
-            SELECT amount, currency 
-            FROM expenses WHERE activate = TRUE {group_filter};
-        """, group_params)
-        expenses = cur.fetchall()
-
-        total_assets_usd = sum(convert_to_usd(a['amount'], a['currency']) for a in assets)
-        total_expenses_usd = sum(convert_to_usd(e['amount'], e['currency']) for e in expenses)
-        summary['total_assets_usd'] = total_assets_usd
-        summary['total_expenses_usd'] = total_expenses_usd
-        summary['net_balance_usd'] = total_assets_usd - total_expenses_usd
-
-        if usd_to_inr_rate and usd_to_inr_rate > 0:
-            summary['total_assets_inr'] = total_assets_usd * usd_to_inr_rate
-            summary['total_expenses_inr'] = total_expenses_usd * usd_to_inr_rate
-            summary['net_balance_inr'] = summary['net_balance_usd'] * usd_to_inr_rate
-
+        cur.execute(
+            "SELECT username, email, user_role, group_id, activate FROM users WHERE id=%s;",
+            (user_id,),
+        )
+        user = cur.fetchone()
+        if not user:
+            session.clear()
+            return
+        if not user["activate"]:
+            # Allow hitting pending page
+            session["username"] = user["username"]
+            return
+        g.user_id = user_id
+        g.user_role = user["user_role"]
+        g.group_id = user["group_id"]
+        g.username = user["username"]
+        g.user_name = user["username"]
     except Exception as e:
-        flash(f"Error loading dashboard: {e}", 'error')
+        print(f"before_request DB error: {e}", file=sys.stderr)
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
 
-    # You provided both dashboard.html and home.html; keep home.html for now
-    return render_template('home.html', summary=summary, user_role=g.user_role, group_id=g.group_id)
+# -------------------------------------------------
+# Utility: Exchange rates
+# -------------------------------------------------
+def get_exchange_rate(from_currency, to_currency="USD"):
+    if not EXCHANGE_RATE_API_KEY:
+        return 1.0 if from_currency == to_currency else 1.0
+    try:
+        url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("result") == "success":
+            return data["conversion_rates"].get(to_currency, 1.0)
+    except Exception as e:
+        print(f"Exchange API error: {e}", file=sys.stderr)
+    return 1.0
 
-# Optional alternate dashboard page if you want to use dashboard.html
-@app.route('/dashboard')
-@login_required
-def dashboard():
-    # Example simple summary_data for your dashboard.html
-    conn = None
-    summary_data = {
-        'total_expenses': 0,
-        'monthly_total': 0.0,
-        'base_currency': 'USD',
-        'recent_expenses': []
+def convert_to_usd(amount, currency):
+    if amount is None:
+        return 0.0
+    if currency == "USD":
+        return float(amount)
+    rate = get_exchange_rate(currency, "USD")
+    return float(amount) / rate if rate else 0.0
+
+# -------------------------------------------------
+# Common choice lists
+# -------------------------------------------------
+def get_common_lists():
+    return {
+        "currencies": ["USD", "EUR", "INR", "GBP", "JPY", "CAD"],
+        "expense_categories": ["Travel", "Food", "Utilities", "Software", "Salary", "Misc"],
+        "asset_types": ["Bank Account", "Brokerage", "Mutual Fund", "Stock", "Bond", "Insurance", "Real Estate", "Crypto", "Other"],
+        "countries": ["USA", "India", "UK", "Canada", "Germany", "Japan", "Australia"],
+        "owners": [{"id": 1, "name": "Primary"}, {"id": 2, "name": "Spouse"}, {"id": 3, "name": "Child"}],
     }
+
+# -------------------------------------------------
+# Health check
+# -------------------------------------------------
+@app.route("/healthz")
+def healthz():
+    return "ok", 200
+
+# -------------------------------------------------
+# Home / Dashboard
+# -------------------------------------------------
+@app.route("/")
+@login_required
+def home():
+    summary = {
+        "total_assets_usd": 0.0,
+        "total_expenses_usd": 0.0,
+        "total_assets_inr": "N/A",
+        "total_expenses_inr": "N/A",
+        "net_balance_usd": 0.0,
+        "net_balance_inr": "N/A",
+    }
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id)
-        # total count
-        cur.execute(f"SELECT COUNT(*) AS c FROM expenses WHERE activate=TRUE {group_filter};", group_params)
-        summary_data['total_expenses'] = cur.fetchone()['c']
-        # month total
+
+        usd_to_inr = get_exchange_rate("USD", "INR")
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id)
+
+        cur.execute(f"SELECT COALESCE(current_value, value) AS amount, currency FROM assets WHERE activate=TRUE {gf};", gp)
+        assets = cur.fetchall()
+
+        cur.execute(f"SELECT amount, currency FROM expenses WHERE activate=TRUE {gf};", gp)
+        expenses = cur.fetchall()
+
+        a_total = sum(convert_to_usd(a["amount"], a["currency"]) for a in assets)
+        e_total = sum(convert_to_usd(e["amount"], e["currency"]) for e in expenses)
+        summary["total_assets_usd"] = a_total
+        summary["total_expenses_usd"] = e_total
+        summary["net_balance_usd"] = a_total - e_total
+
+        if usd_to_inr and usd_to_inr > 0:
+            summary["total_assets_inr"] = a_total * usd_to_inr
+            summary["total_expenses_inr"] = e_total * usd_to_inr
+            summary["net_balance_inr"] = summary["net_balance_usd"] * usd_to_inr
+    except Exception as e:
+        flash(f"Error loading dashboard: {e}", "error")
+        print(f"home error: {e}", file=sys.stderr)
+    finally:
+        if conn:
+            try: cur.close()
+            except: pass
+            conn.close()
+
+    return render_template("home.html", summary=summary, user_role=g.user_role, group_id=g.group_id)
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    summary_data = {"total_expenses": 0, "monthly_total": 0.0, "base_currency": "USD", "recent_expenses": []}
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id)
+
+        cur.execute(f"SELECT COUNT(*) AS c FROM expenses WHERE activate=TRUE {gf};", gp)
+        summary_data["total_expenses"] = cur.fetchone()["c"]
+
         cur.execute(f"""
             SELECT COALESCE(SUM(amount),0) AS s
             FROM expenses
             WHERE activate=TRUE
-              AND date_incurred >= date_trunc('month', NOW()) {group_filter};
-        """, group_params)
-        summary_data['monthly_total'] = float(cur.fetchone()['s'] or 0)
-        # recent items (decrypt description)
-        cur.execute(f"""
+              AND date_incurred >= date_trunc('month', NOW()) {gf};
+        """, gp)
+        summary_data["monthly_total"] = float(cur.fetchone()["s"] or 0)
+
+        cur.execute("""
             SELECT id, description, amount, currency, date_incurred
             FROM expenses
             WHERE activate=TRUE
             ORDER BY date_incurred DESC
             LIMIT 5;
         """)
-        recent = cur.fetchall()
-        arr = []
-        for r in recent:
-            arr.append({
-                'id': r['id'],
-                'description': encryptor.decrypt(r['description']),
-                'amount': float(r['amount']),
-                'currency': r['currency'],
-                'expense_date_fmt': r['date_incurred'].strftime('%Y-%m-%d')
+        for r in cur.fetchall():
+            summary_data["recent_expenses"].append({
+                "id": r["id"],
+                "description": dec(r["description"]),
+                "amount": float(r["amount"]),
+                "currency": r["currency"],
+                "expense_date_fmt": r["date_incurred"].strftime("%Y-%m-%d") if r["date_incurred"] else "",
             })
-        summary_data['recent_expenses'] = arr
     except Exception as e:
         print(f"dashboard error: {e}", file=sys.stderr)
     finally:
@@ -289,54 +336,50 @@ def dashboard():
             try: cur.close()
             except: pass
             conn.close()
-    return render_template('dashboard.html', summary_data=summary_data)
+    return render_template("dashboard.html", summary_data=summary_data)
 
 # -------------------------------------------------
 # Auth
 # -------------------------------------------------
-@app.route('/login', methods=['GET', 'POST'])
+@limiter.limit("5 per minute")
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    if request.method == 'POST':
-        # Your login.html uses username (not email)
-        username = request.form['username']
-        password = request.form['password']
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id, password_hash, activate FROM users WHERE username = %s;", (username,))
+            cur.execute("SELECT id, password_hash, activate FROM users WHERE username=%s;", (username,))
             user = cur.fetchone()
-            if user and bcrypt.check_password_hash(user['password_hash'], password):
-                if not user['activate']:
-                    session['user_id'] = user['id']
-                    session['username'] = username
-                    return redirect(url_for('pending_approval'))
-                session['user_id'] = user['id']
-                flash('Login successful.', 'success')
-                return redirect(url_for('home'))
-            else:
-                flash('Invalid username or password.', 'error')
+            if user and bcrypt.check_password_hash(user["password_hash"], password):
+                session["user_id"] = user["id"]
+                session["username"] = username
+                if not user["activate"]:
+                    return redirect(url_for("pending_approval"))
+                flash("Login successful.", "success")
+                return redirect(url_for("home"))
+            flash("Invalid username or password.", "error")
         except Exception as e:
-            flash('An error occurred during login.', 'error')
-            print(f"Login error: {e}", file=sys.stderr)
+            print(f"login error: {e}", file=sys.stderr)
+            flash("Login failed.", "error")
         finally:
             if conn:
                 try: cur.close()
                 except: pass
                 conn.close()
-    return render_template('login.html')
+    return render_template("login.html")
 
-@app.route('/register', methods=['GET', 'POST'])
+@limiter.limit("3 per minute")
+@app.route("/register", methods=["GET", "POST"])
 def register():
-    # Your register.html has only username + password.
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        # store username also as email if you like; or keep email NULL
-        email = username  # since your UI implies username is unique email
-        password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
-        role = 'Member'
-        # New users start inactivate, require admin approval + group assignment
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        email = username  # treat username as email
+        phash = bcrypt.generate_password_hash(password).decode("utf-8")
+        role = "Member"
         conn = None
         try:
             conn = get_db_connection()
@@ -345,49 +388,49 @@ def register():
                 INSERT INTO users (username, email, password_hash, user_role, group_id, activate)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id;
-            """, (username, email, password_hash, role, None, False))
-            user_id = cur.fetchone()[0]
+            """, (username, email, phash, role, None, False))
+            uid = cur.fetchone()[0]
             conn.commit()
-            session['user_id'] = user_id
-            session['username'] = username
-            return redirect(url_for('pending_approval'))
+            session["user_id"] = uid
+            session["username"] = username
+            return redirect(url_for("pending_approval"))
         except psycopg2.IntegrityError:
-            flash('That username already exists.', 'error')
+            flash("That username already exists.", "error")
         except Exception as e:
-            flash('An unexpected error occurred during registration.', 'error')
-            print(f"Registration error: {e}", file=sys.stderr)
+            print(f"register error: {e}", file=sys.stderr)
+            flash("Registration failed.", "error")
         finally:
             if conn:
                 try: cur.close()
                 except: pass
                 conn.close()
-    return render_template('register.html')
+    return render_template("register.html")
 
-@app.route('/pending_approval')
+@app.route("/pending_approval")
 @login_required
 def pending_approval():
-    return render_template('pending_approval.html')
+    return render_template("pending_approval.html")
 
-@app.route('/logout')
+@app.route("/logout")
 @login_required
 def logout():
     session.clear()
-    flash('You have been logged out.', 'success')
-    return redirect(url_for('login'))
+    flash("You have been logged out.", "success")
+    return redirect(url_for("login"))
 
 # -------------------------------------------------
-# Forgot / Reset Password (SMTP email)
+# Password reset via email
 # -------------------------------------------------
 def send_email(to_email, subject, html_body):
-    if not MAIL_SERVER or not MAIL_USERNAME or not MAIL_PASSWORD:
-        print("SMTP not configured; skipping send.", file=sys.stderr)
+    if not (MAIL_SERVER and MAIL_USERNAME and MAIL_PASSWORD):
+        print("SMTP not configured; email skipped.", file=sys.stderr)
         return False
     msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = MAIL_SENDER
-    msg['To'] = to_email
-    msg.set_content("Please view this email in an HTML-capable client.")
-    msg.add_alternative(html_body, subtype='html')
+    msg["Subject"] = subject
+    msg["From"] = MAIL_SENDER
+    msg["To"] = to_email
+    msg.set_content("Please view this message in an HTML-capable client.")
+    msg.add_alternative(html_body, subtype="html")
     try:
         if MAIL_USE_TLS:
             server = smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10)
@@ -402,50 +445,47 @@ def send_email(to_email, subject, html_body):
         print(f"Email send failed: {e}", file=sys.stderr)
         return False
 
-@app.route('/forgot_password', methods=['GET', 'POST'])
+@limiter.limit("5 per hour")
+@app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
-    # Your template posts "username" which is also the email identifier in DB
-    if request.method == 'POST':
-        username = request.form['username']
+    if request.method == "POST":
+        username = request.form["username"]
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id, email FROM users WHERE username = %s;", (username,))
+            cur.execute("SELECT id, email FROM users WHERE username=%s;", (username,))
             user = cur.fetchone()
             if not user:
                 flash("If the account exists, a reset link has been sent.", "success")
-                return render_template('forgot_password.html')
+                return render_template("forgot_password.html")
+
             token = secrets.token_urlsafe(32)
             expiration = datetime.now() + timedelta(hours=1)
             cur2 = conn.cursor()
-            cur2.execute("UPDATE users SET reset_token=%s, token_expiration=%s WHERE id=%s;", (token, expiration, user['id']))
+            cur2.execute("UPDATE users SET reset_token=%s, token_expiration=%s WHERE id=%s;", (token, expiration, user["id"]))
             conn.commit()
-            # Build absolute reset URL
-            base = request.url_root  # e.g., https://your-app.onrender.com/
-            reset_url = urljoin(base, url_for('reset_password', token=token))
+
+            reset_url = urljoin(request.url_root, url_for("reset_password", token=token))
             html = f"""
-            <h3>Password Reset</h3>
-            <p>Click the link below to reset your password (valid for 1 hour):</p>
-            <p><a href="{reset_url}">{reset_url}</a></p>
+                <h3>Password Reset</h3>
+                <p>Click to reset your password (valid for 1 hour):</p>
+                <p><a href="{reset_url}">{reset_url}</a></p>
             """
-            # Send email to stored email (we set email=username on register)
-            ok = send_email(user['email'] or username, "Password Reset", html)
-            if ok:
-                flash("Password reset link sent! Check your email.", "success")
-            else:
-                flash("Could not send email (SMTP not configured).", "error")
+            ok = send_email(user["email"] or username, "Password Reset", html)
+            flash("Password reset link sent!" if ok else "Email send failed (SMTP not configured).", "success" if ok else "error")
         except Exception as e:
-            print(f"Forgot password error: {e}", file=sys.stderr)
+            print(f"forgot_password error: {e}", file=sys.stderr)
             flash("Error generating reset link.", "error")
         finally:
             if conn:
                 try: cur.close()
                 except: pass
                 conn.close()
-    return render_template('forgot_password.html')
+    return render_template("forgot_password.html")
 
-@app.route('/reset_password/<token>', methods=['GET', 'POST'])
+@limiter.limit("5 per hour")
+@app.route("/reset_password/<token>", methods=["GET", "POST"])
 def reset_password(token):
     conn = None
     try:
@@ -455,53 +495,74 @@ def reset_password(token):
         user = cur.fetchone()
         if not user:
             flash("Invalid or expired token.", "error")
-            return redirect(url_for('login'))
-        if request.method == 'POST':
-            password = request.form['password']
-            password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+            return redirect(url_for("login"))
+        if request.method == "POST":
+            password = request.form["password"]
+            phash = bcrypt.generate_password_hash(password).decode("utf-8")
             cur2 = conn.cursor()
-            cur2.execute("UPDATE users SET password_hash=%s, reset_token=NULL, token_expiration=NULL WHERE id=%s;", (password_hash, user['id']))
+            cur2.execute("UPDATE users SET password_hash=%s, reset_token=NULL, token_expiration=NULL WHERE id=%s;", (phash, user["id"]))
             conn.commit()
             flash("Password reset successful.", "success")
-            return redirect(url_for('login'))
+            return redirect(url_for("login"))
     except Exception as e:
-        print(f"Reset password error: {e}", file=sys.stderr)
+        print(f"reset_password error: {e}", file=sys.stderr)
         flash("Password reset failed.", "error")
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
-    return render_template('reset_password.html')
+    return render_template("reset_password.html")
 
 # -------------------------------------------------
-# Change Password (logged-in)
+# Profile & Change password
 # -------------------------------------------------
-@app.route('/change_password', methods=['GET', 'POST'])
+@app.route("/profile")
+@login_required
+def profile():
+    conn = None
+    user = {"username": g.username, "email": None, "group_id": g.group_id}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT username, email, group_id FROM users WHERE id=%s;", (g.user_id,))
+        row = cur.fetchone()
+        if row:
+            user = row
+    except Exception as e:
+        print(f"profile error: {e}", file=sys.stderr)
+    finally:
+        if conn:
+            try: cur.close()
+            except: pass
+            conn.close()
+    return render_template("profile.html", user=user)
+
+@app.route("/change_password", methods=["GET", "POST"])
 @login_required
 def change_password():
-    if request.method == 'POST':
-        current = request.form['current_password']
-        new = request.form['new_password']
-        confirm = request.form['confirm_password']
+    if request.method == "POST":
+        current = request.form["current_password"]
+        new = request.form["new_password"]
+        confirm = request.form["confirm_password"]
         if new != confirm:
             flash("New passwords do not match.", "error")
-            return render_template('change_password.html')
+            return render_template("change_password.html")
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
             cur.execute("SELECT password_hash FROM users WHERE id=%s;", (g.user_id,))
             row = cur.fetchone()
-            if not row or not bcrypt.check_password_hash(row['password_hash'], current):
+            if not row or not bcrypt.check_password_hash(row["password_hash"], current):
                 flash("Current password is incorrect.", "error")
-                return render_template('change_password.html')
-            new_hash = bcrypt.generate_password_hash(new).decode('utf-8')
+                return render_template("change_password.html")
+            new_hash = bcrypt.generate_password_hash(new).decode("utf-8")
             cur2 = conn.cursor()
             cur2.execute("UPDATE users SET password_hash=%s WHERE id=%s;", (new_hash, g.user_id))
             conn.commit()
             flash("Password updated.", "success")
-            return redirect(url_for('profile'))
+            return redirect(url_for("profile"))
         except Exception as e:
             print(f"change_password error: {e}", file=sys.stderr)
             flash("Password change failed.", "error")
@@ -510,43 +571,21 @@ def change_password():
                 try: cur.close()
                 except: pass
                 conn.close()
-    return render_template('change_password.html')
-
-# -------------------------------------------------
-# Profile
-# -------------------------------------------------
-@app.route('/profile')
-@login_required
-def profile():
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT username, email, group_id FROM users WHERE id=%s;", (g.user_id,))
-        user = cur.fetchone()
-    except Exception as e:
-        print(f"profile error: {e}", file=sys.stderr)
-        user = {'username': g.username, 'email': None, 'group_id': g.group_id}
-    finally:
-        if conn:
-            try: cur.close()
-            except: pass
-            conn.close()
-    return render_template('profile.html', user=user)
+    return render_template("change_password.html")
 
 # -------------------------------------------------
 # Group management
 # -------------------------------------------------
-@app.route('/group')
+@app.route("/group")
 @login_required
 def group_management():
     is_default = g.group_id is None
-    return render_template('group_management.html', username=g.username, group_id=g.group_id, is_default_group=is_default)
+    return render_template("group_management.html", username=g.username, group_id=g.group_id, is_default_group=is_default)
 
-@app.route('/create_group', methods=['POST'])
+@limiter.limit("10 per hour")
+@app.route("/create_group", methods=["POST"])
 @login_required
 def create_group():
-    # Simple approach: generate a random group token and set on user
     new_gid = f"family-{secrets.token_urlsafe(4)}"
     conn = None
     try:
@@ -563,15 +602,16 @@ def create_group():
             try: cur.close()
             except: pass
             conn.close()
-    return redirect(url_for('group_management'))
+    return redirect(url_for("group_management"))
 
-@app.route('/join_group', methods=['POST'])
+@limiter.limit("10 per hour")
+@app.route("/join_group", methods=["POST"])
 @login_required
 def join_group():
-    target_gid = request.form.get('target_group_id')
+    target_gid = request.form.get("target_group_id")
     if not target_gid:
         flash("Group ID required.", "error")
-        return redirect(url_for('group_management'))
+        return redirect(url_for("group_management"))
     conn = None
     try:
         conn = get_db_connection()
@@ -587,35 +627,36 @@ def join_group():
             try: cur.close()
             except: pass
             conn.close()
-    return redirect(url_for('group_management'))
+    return redirect(url_for("group_management"))
 
 # -------------------------------------------------
-# Admin: Approve Users
+# Admin approval
 # -------------------------------------------------
-@app.route('/admin/approve_users', methods=['GET', 'POST'])
+@limiter.limit("10 per hour")
+@app.route("/admin/approve_users", methods=["GET", "POST"])
 @login_required
 @admin_required
 def admin_approve_users():
     conn = None
     try:
         conn = get_db_connection()
-        if request.method == 'POST':
-            user_id = request.form.get('user_id')
-            group_id = request.form.get('group_id')
+        if request.method == "POST":
+            user_id = request.form.get("user_id")
+            group_id = request.form.get("group_id")
             cur = conn.cursor()
             cur.execute("UPDATE users SET activate=TRUE, group_id=%s WHERE id=%s;", (group_id, user_id))
             conn.commit()
             flash("User approved and group assigned.", "success")
-            return redirect(url_for('admin_approve_users'))
+            return redirect(url_for("admin_approve_users"))
 
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT id, username FROM users WHERE activate=FALSE;")
         pending = cur.fetchall()
-        return render_template('admin_approve_users.html', pending_users=pending)
+        return render_template("admin_approve_users.html", pending_users=pending)
     except Exception as e:
         print(f"admin_approve_users error: {e}", file=sys.stderr)
         flash("Admin action failed.", "error")
-        return redirect(url_for('home'))
+        return redirect(url_for("home"))
     finally:
         if conn:
             try: cur.close()
@@ -625,72 +666,72 @@ def admin_approve_users():
 # -------------------------------------------------
 # Expenses
 # -------------------------------------------------
-@app.route('/expenses')
+@app.route("/expenses")
 @login_required
 def expenses():
     conn = None
-    expenses_list = []
+    rows = []
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, table_alias='e')
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="e")
         cur.execute(f"""
             SELECT e.id, e.description, e.amount, e.currency, e.category, e.date_incurred AS expense_date, e.activate
             FROM expenses e
-            WHERE e.activate = TRUE {group_filter}
+            WHERE e.activate=TRUE {gf}
             ORDER BY e.date_incurred DESC;
-        """, group_params)
-        rows = cur.fetchall()
-        for r in rows:
-            r['description'] = encryptor.decrypt(r['description']) if r['description'] else ''
-            r['amount'] = float(r['amount'])
-            r['expense_date'] = r['expense_date'].strftime('%Y-%m-%d') if r['expense_date'] else ''
-            expenses_list.append(r)
+        """, gp)
+        for r in cur.fetchall():
+            rows.append({
+                "id": r["id"],
+                "description": dec(r["description"]) if r["description"] else "",
+                "amount": float(r["amount"]) if r["amount"] is not None else None,
+                "currency": r["currency"],
+                "category": r["category"],
+                "expense_date": r["expense_date"].strftime("%Y-%m-%d") if r["expense_date"] else "",
+            })
     except Exception as e:
-        flash(f"Error loading expenses: {e}", 'error')
-        print(f"Expenses list error: {e}", file=sys.stderr)
+        print(f"expenses load error: {e}", file=sys.stderr)
+        flash(f"Error loading expenses: {e}", "error")
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
-    return render_template('expenses.html', expenses=expenses_list)
+    return render_template("expenses.html", expenses=rows)
 
-@app.route('/add_expense', methods=['GET', 'POST'])
+@app.route("/add_expense", methods=["GET", "POST"])
 @login_required
 def add_expense():
     lists = get_common_lists()
-    if request.method == 'POST':
-        description = request.form['description']
-        amount = request.form['amount']
-        currency = request.form['currency']
-        category = request.form['category']
-        # HTML field is expense_date; DB column is date_incurred
-        expense_date = request.form['expense_date']
-
+    if request.method == "POST":
+        description = request.form["description"]
+        amount = request.form["amount"]
+        currency = request.form["currency"]
+        category = request.form["category"]
+        expense_date = request.form["expense_date"]
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            encrypted_description = encryptor.encrypt(description)
             cur.execute("""
                 INSERT INTO expenses (group_id, description, amount, currency, category, date_incurred, created_by, activate)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE);
-            """, (g.group_id, encrypted_description, amount, currency, category, expense_date, g.user_id))
+            """, (g.group_id, enc(description), amount, currency, category, expense_date, g.user_id))
             conn.commit()
-            flash('Expense successfully added.', 'success')
-            return redirect(url_for('expenses'))
+            flash("Expense successfully added.", "success")
+            return redirect(url_for("expenses"))
         except Exception as e:
-            flash(f"Error adding expense: {e}", 'error')
-            print(f"Expense creation error: {e}", file=sys.stderr)
+            print(f"add_expense error: {e}", file=sys.stderr)
+            flash(f"Error adding expense: {e}", "error")
         finally:
             if conn:
                 try: cur.close()
                 except: pass
                 conn.close()
-    return render_template('add_expense.html', categories=lists['expense_categories'], currencies=lists['currencies'])
+    return render_template("add_expense.html", categories=lists["expense_categories"], currencies=lists["currencies"])
 
-@app.route('/edit_expense/<int:expense_id>', methods=['GET', 'POST'])
+@app.route("/edit_expense/<int:expense_id>", methods=["GET", "POST"])
 @login_required
 def edit_expense(expense_id):
     lists = get_common_lists()
@@ -698,87 +739,80 @@ def edit_expense(expense_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, table_alias='e')
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="e")
         cur.execute(f"""
             SELECT e.id, e.description, e.amount, e.currency, e.category, e.date_incurred AS expense_date
             FROM expenses e
-            WHERE e.id=%s AND e.activate=TRUE {group_filter};
-        """, (expense_id,) + group_params)
+            WHERE e.id=%s AND e.activate=TRUE {gf};
+        """, (expense_id,) + gp)
         expense = cur.fetchone()
         if not expense:
-            flash("Expense not found or unauthorized.", 'error')
-            return redirect(url_for('expenses'))
+            flash("Expense not found or unauthorized.", "error")
+            return redirect(url_for("expenses"))
 
-        if request.method == 'POST':
-            description = request.form['description']
-            amount = request.form['amount']
-            currency = request.form['currency']
-            category = request.form['category']
-            expense_date = request.form['expense_date']
-            encrypted_description = encryptor.encrypt(description)
-
+        if request.method == "POST":
+            description = request.form["description"]
+            amount = request.form["amount"]
+            currency = request.form["currency"]
+            category = request.form["category"]
+            expense_date = request.form["expense_date"]
             cur2 = conn.cursor()
             cur2.execute(f"""
                 UPDATE expenses
                 SET description=%s, amount=%s, currency=%s, category=%s, date_incurred=%s
-                WHERE id=%s AND activate=TRUE {group_filter};
-            """, (encrypted_description, amount, currency, category, expense_date, expense_id) + group_params)
+                WHERE id=%s AND activate=TRUE {gf};
+            """, (enc(description), amount, currency, category, expense_date, expense_id) + gp)
             if cur2.rowcount == 0:
-                flash("Update failed: not found or unauthorized.", 'error')
+                flash("Update failed: not found or unauthorized.", "error")
             else:
                 conn.commit()
-                flash('Expense successfully updated.', 'success')
-                return redirect(url_for('expenses'))
+                flash("Expense successfully updated.", "success")
+                return redirect(url_for("expenses"))
 
-        # decrypt for display in form
-        expense['description'] = encryptor.decrypt(expense['description'])
-        expense['amount'] = float(expense['amount'])
-        expense['expense_date'] = expense['expense_date'].strftime('%Y-%m-%d') if expense['expense_date'] else ''
-        return render_template('edit_expense.html', expense=expense, categories=lists['expense_categories'], currencies=lists['currencies'])
+        expense["description"] = dec(expense["description"])
+        expense["amount"] = float(expense["amount"]) if expense["amount"] is not None else None
+        expense["expense_date"] = expense["expense_date"].strftime("%Y-%m-%d") if expense["expense_date"] else ""
+        return render_template("edit_expense.html", expense=expense, categories=lists["expense_categories"], currencies=lists["currencies"])
     except Exception as e:
-        flash(f"Error editing expense: {e}", 'error')
-        print(f"Expense edit error: {e}", file=sys.stderr)
-        return redirect(url_for('expenses'))
+        print(f"edit_expense error: {e}", file=sys.stderr)
+        flash(f"Error editing expense: {e}", "error")
+        return redirect(url_for("expenses"))
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
 
-@app.route('/delete_expense/<int:expense_id>', methods=['POST'])
+@app.route("/delete_expense/<int:expense_id>", methods=["POST"])
 @login_required
 def delete_expense(expense_id):
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id)
-        cur.execute(f"UPDATE expenses SET activate=FALSE WHERE id=%s {group_filter};", (expense_id,) + group_params)
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id)
+        cur.execute(f"UPDATE expenses SET activate=FALSE WHERE id=%s {gf};", (expense_id,) + gp)
         if cur.rowcount == 0:
-            flash("Delete failed: not found or unauthorized.", 'error')
+            flash("Delete failed: not found or unauthorized.", "error")
         else:
             conn.commit()
-            flash("Expense removed.", 'success')
+            flash("Expense removed.", "success")
     except Exception as e:
-        flash(f"Error deleting expense: {e}", 'error')
-        print(f"Expense delete error: {e}", file=sys.stderr)
+        print(f"delete_expense error: {e}", file=sys.stderr)
+        flash(f"Error deleting expense: {e}", "error")
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
-    return redirect(url_for('expenses'))
+    return redirect(url_for("expenses"))
 
 # -------------------------------------------------
-# Assets (rich schema with encryption for sensitive fields)
+# Assets
 # -------------------------------------------------
-SENSITIVE_ASSET_FIELDS = ['account_no', 'beneficiary_name', 'contact_phone', 'document_location', 'description']
+SENSITIVE_ASSET_FIELDS = ["account_no", "beneficiary_name", "contact_phone", "document_location", "description"]
 
-def enc(v): return encryptor.encrypt(v) if v not in (None, '') else None
-def dec(v): return encryptor.decrypt(v) if v not in (None, '') else ''
-
-@app.route('/assets')
+@app.route("/assets")
 @login_required
 def assets():
     conn = None
@@ -786,65 +820,58 @@ def assets():
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, table_alias='a')
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
         cur.execute(f"""
             SELECT a.id, a.user_id, a.type, a.name, a.country, a.currency, a.value, a.account_no,
                    a.last_updated, a.notes, a.activate, a.owner, a.owner_id, a.financial_institution,
                    a.beneficiary_name, a.policy_or_plan_type, a.contact_phone, a.document_location,
                    a.investment_strategy, a.current_value, a.description, a.added_date, a.group_id
             FROM assets a
-            WHERE a.activate=TRUE {group_filter}
+            WHERE a.activate=TRUE {gf}
             ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC;
-        """, group_params)
+        """, gp)
         rows = cur.fetchall()
-        # decrypt sensitive fields
         for r in rows:
-            r['account_no'] = dec(r['account_no'])
-            r['beneficiary_name'] = dec(r['beneficiary_name'])
-            r['contact_phone'] = dec(r['contact_phone'])
-            r['document_location'] = dec(r['document_location'])
-            r['description'] = dec(r['description'])
-            # Normalize dates
-            if r.get('last_updated'):
-                r['last_updated'] = r['last_updated'].strftime('%Y-%m-%d')
-            if r.get('added_date'):
-                r['added_date'] = r['added_date'].strftime('%Y-%m-%d')
+            # decrypt only if encrypted (legacy plaintext kept)
+            r["account_no"] = dec(r["account_no"])
+            r["beneficiary_name"] = dec(r["beneficiary_name"])
+            r["contact_phone"] = dec(r["contact_phone"])
+            r["document_location"] = dec(r["document_location"])
+            r["description"] = dec(r["description"])
+            if r.get("last_updated"):
+                r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
+            if r.get("added_date"):
+                r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
     except Exception as e:
-        flash(f"Error loading assets: {e}", 'error')
-        print(f"Assets load error: {e}", file=sys.stderr)
+        print(f"assets load error: {e}", file=sys.stderr)
+        flash(f"Error loading assets: {e}", "error")
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
-    # You can create a simple assets.html list, or reuse edit pages from a detail link.
-    return render_template('assets.html', assets=rows) if os.path.exists('templates/assets.html') else "Assets list page (create templates/assets.html to render a table)."
+    # Assumes you added templates/assets.html from our previous message
+    return render_template("assets.html", assets=rows)
 
-@app.route('/add_asset', methods=['GET', 'POST'])
+@app.route("/add_asset", methods=["GET", "POST"])
 @login_required
 def add_asset():
     lists = get_common_lists()
-    if request.method == 'POST':
-        # Required core fields
-        owner_id = request.form.get('owner_id')
-        atype = request.form.get('type')
-        name = request.form.get('name')
-        account_no = request.form.get('account_no')
-        value = request.form.get('value')
-        currency = request.form.get('currency')
-        country = request.form.get('country')
-
-        # Policy & critical
-        financial_institution = request.form.get('financial_institution')
-        policy_or_plan_type = request.form.get('policy_or_plan_type')
-        beneficiary_name = request.form.get('beneficiary_name')
-        contact_phone = request.form.get('contact_phone')
-        document_location = request.form.get('document_location')
-
-        # Notes/strategy
-        investment_strategy = request.form.get('investment_strategy')
-        notes = request.form.get('notes')
-
+    if request.method == "POST":
+        owner_id = request.form.get("owner_id")
+        atype = request.form.get("type")
+        name = request.form.get("name")
+        account_no = request.form.get("account_no")
+        value = request.form.get("value")
+        currency = request.form.get("currency")
+        country = request.form.get("country")
+        financial_institution = request.form.get("financial_institution")
+        policy_or_plan_type = request.form.get("policy_or_plan_type")
+        beneficiary_name = request.form.get("beneficiary_name")
+        contact_phone = request.form.get("contact_phone")
+        document_location = request.form.get("document_location")
+        investment_strategy = request.form.get("investment_strategy")
+        notes = request.form.get("notes")
         now = datetime.now()
         added_date = now.date()
         last_updated = now
@@ -865,11 +892,11 @@ def add_asset():
             """, (
                 g.user_id, atype, name, country, currency, value, enc(account_no), last_updated, notes,
                 None, owner_id, enc(financial_institution), enc(beneficiary_name), policy_or_plan_type, enc(contact_phone),
-                enc(document_location), investment_strategy, value, enc(''), added_date, g.group_id
+                enc(document_location), investment_strategy, value, enc(""), added_date, g.group_id
             ))
             conn.commit()
             flash("Asset saved.", "success")
-            return redirect(url_for('assets'))
+            return redirect(url_for("assets"))
         except Exception as e:
             print(f"add_asset error: {e}", file=sys.stderr)
             flash("Failed to save asset.", "error")
@@ -879,13 +906,15 @@ def add_asset():
                 except: pass
                 conn.close()
 
-    return render_template('add_asset.html',
-                           owners=lists['owners'],
-                           asset_types=lists['asset_types'],
-                           currencies=lists['currencies'],
-                           countries=lists['countries'])
+    return render_template(
+        "add_asset.html",
+        owners=lists["owners"],
+        asset_types=lists["asset_types"],
+        currencies=lists["currencies"],
+        countries=lists["countries"],
+    )
 
-@app.route('/edit_asset/<int:asset_id>', methods=['GET', 'POST'])
+@app.route("/edit_asset/<int:asset_id>", methods=["GET", "POST"])
 @login_required
 def edit_asset(asset_id):
     lists = get_common_lists()
@@ -893,32 +922,32 @@ def edit_asset(asset_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, table_alias='a')
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
         cur.execute(f"""
             SELECT a.*
             FROM assets a
-            WHERE a.id=%s AND a.activate=TRUE {group_filter};
-        """, (asset_id,) + group_params)
+            WHERE a.id=%s AND a.activate=TRUE {gf};
+        """, (asset_id,) + gp)
         asset = cur.fetchone()
         if not asset:
             flash("Asset not found or unauthorized.", "error")
-            return redirect(url_for('assets'))
+            return redirect(url_for("assets"))
 
-        if request.method == 'POST':
-            owner_id = request.form.get('owner_id')
-            atype = request.form.get('type')
-            name = request.form.get('name')
-            account_no = request.form.get('account_no')
-            value = request.form.get('value')
-            currency = request.form.get('currency')
-            country = request.form.get('country')
-            financial_institution = request.form.get('financial_institution')
-            policy_or_plan_type = request.form.get('policy_or_plan_type')
-            beneficiary_name = request.form.get('beneficiary_name')
-            contact_phone = request.form.get('contact_phone')
-            document_location = request.form.get('document_location')
-            investment_strategy = request.form.get('investment_strategy')
-            notes = request.form.get('notes')
+        if request.method == "POST":
+            owner_id = request.form.get("owner_id")
+            atype = request.form.get("type")
+            name = request.form.get("name")
+            account_no = request.form.get("account_no")
+            value = request.form.get("value")
+            currency = request.form.get("currency")
+            country = request.form.get("country")
+            financial_institution = request.form.get("financial_institution")
+            policy_or_plan_type = request.form.get("policy_or_plan_type")
+            beneficiary_name = request.form.get("beneficiary_name")
+            contact_phone = request.form.get("contact_phone")
+            document_location = request.form.get("document_location")
+            investment_strategy = request.form.get("investment_strategy")
+            notes = request.form.get("notes")
             last_updated = datetime.now()
 
             cur2 = conn.cursor()
@@ -927,48 +956,49 @@ def edit_asset(asset_id):
                 SET owner_id=%s, type=%s, name=%s, account_no=%s, value=%s, currency=%s, country=%s,
                     financial_institution=%s, policy_or_plan_type=%s, beneficiary_name=%s, contact_phone=%s,
                     document_location=%s, investment_strategy=%s, notes=%s, last_updated=%s
-                WHERE id=%s AND activate=TRUE {group_filter};
+                WHERE id=%s AND activate=TRUE {gf};
             """, (
                 owner_id, atype, name, enc(account_no), value, currency, country,
                 enc(financial_institution), policy_or_plan_type, enc(beneficiary_name), enc(contact_phone),
-                enc(document_location), investment_strategy, notes, last_updated,
-                asset_id
-            ) + group_params)
+                enc(document_location), investment_strategy, notes, last_updated, asset_id
+            ) + gp)
             if cur2.rowcount == 0:
                 flash("Update failed: not found or unauthorized.", "error")
             else:
                 conn.commit()
                 flash("Asset updated.", "success")
-                return redirect(url_for('assets'))
+                return redirect(url_for("assets"))
 
-        # decrypt for form display
+        # decrypt for form display (legacy plaintext is okay)
         for f in SENSITIVE_ASSET_FIELDS:
             asset[f] = dec(asset.get(f))
-        return render_template('edit_asset.html',
-                               asset=asset,
-                               owners=lists['owners'],
-                               asset_types=lists['asset_types'],
-                               currencies=lists['currencies'],
-                               countries=lists['countries'])
+        return render_template(
+            "edit_asset.html",
+            asset=asset,
+            owners=lists["owners"],
+            asset_types=lists["asset_types"],
+            currencies=lists["currencies"],
+            countries=lists["countries"],
+        )
     except Exception as e:
         print(f"edit_asset error: {e}", file=sys.stderr)
         flash("Failed to load asset.", "error")
-        return redirect(url_for('assets'))
+        return redirect(url_for("assets"))
     finally:
         if conn:
             try: cur.close()
             except: pass
             conn.close()
 
-@app.route('/delete_asset/<int:asset_id>', methods=['POST'])
+@app.route("/delete_asset/<int:asset_id>", methods=["POST"])
 @login_required
 def delete_asset(asset_id):
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id)
-        cur.execute(f"UPDATE assets SET activate=FALSE WHERE id=%s {group_filter};", (asset_id,) + group_params)
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id)
+        cur.execute(f"UPDATE assets SET activate=FALSE WHERE id=%s {gf};", (asset_id,) + gp)
         if cur.rowcount == 0:
             flash("Delete failed: not found or unauthorized.", "error")
         else:
@@ -982,46 +1012,12 @@ def delete_asset(asset_id):
             try: cur.close()
             except: pass
             conn.close()
-    return redirect(url_for('assets'))
+    return redirect(url_for("assets"))
 
 # -------------------------------------------------
-# Misc placeholder routes so nav links don't 404
+# Dev helper: init_db (optional)
 # -------------------------------------------------
-@app.route('/reports')
-@login_required
-def reports():
-    return render_template('reports.html') if os.path.exists('templates/reports.html') else "Reports coming soon."
-
-@app.route('/currencies')
-@login_required
-def currencies():
-    return render_template('currencies.html') if os.path.exists('templates/currencies.html') else "Currencies view coming soon."
-
-@app.route('/users')
-@login_required
-@admin_required
-def users():
-    # Simple admin users list
-    conn = None
-    out = []
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT id, username, email, user_role, group_id, activate FROM users ORDER BY id;")
-        out = cur.fetchall()
-    except Exception as e:
-        print(f"users list error: {e}", file=sys.stderr)
-    finally:
-        if conn:
-            try: cur.close()
-            except: pass
-            conn.close()
-    return render_template('users.html', users=out) if os.path.exists('templates/users.html') else "Users list (create templates/users.html)."
-
-# -------------------------------------------------
-# Optional: init_db (use only for dev)
-# -------------------------------------------------
-@app.route('/init_db')
+@app.route("/init_db")
 def init_db():
     conn = None
     try:
@@ -1029,7 +1025,6 @@ def init_db():
         cur = conn.cursor()
 
         cur.execute("""
-        -- Drop tables for dev only
         DROP TABLE IF EXISTS expenses;
         DROP TABLE IF EXISTS assets;
         DROP TABLE IF EXISTS users;
@@ -1087,20 +1082,22 @@ def init_db():
         );
         """)
 
-        # Sample admin
-        sample_hash = bcrypt.generate_password_hash('password').decode('utf-8')
+        # seed admin
+        sample_hash = bcrypt.generate_password_hash("password").decode("utf-8")
         cur.execute("""
             INSERT INTO users (username, email, password_hash, user_role, group_id, activate)
-            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
-        """, ('admin', 'admin@example.com', sample_hash, 'Admin', 'family-demo', True))
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id;
+        """, ("admin", "admin@example.com", sample_hash, "Admin", "family-demo", True))
         admin_id = cur.fetchone()[0]
 
-        # Sample data
+        # sample expense
         cur.execute("""
             INSERT INTO expenses (group_id, description, amount, currency, category, date_incurred, created_by)
             VALUES (%s, %s, %s, %s, %s, %s, %s);
-        """, ('family-demo', encryptor.encrypt('Office Rental Payment'), 1200.00, 'USD', 'Utilities', datetime.now().date(), admin_id))
+        """, ("family-demo", enc("Office Rental Payment"), 1200.00, "USD", "Utilities", datetime.now().date(), admin_id))
 
+        # sample asset
         cur.execute("""
             INSERT INTO assets (user_id, type, name, country, currency, value, account_no, last_updated, notes, owner, owner_id,
                                 financial_institution, beneficiary_name, policy_or_plan_type, contact_phone, document_location,
@@ -1108,11 +1105,11 @@ def init_db():
             VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s);
-        """, (admin_id, 'Bank Account', 'Checking - Demo', 'USA', 'USD', 5000.00, encryptor.encrypt('****1234'),
-              'Sample notes', 'Admin User', 1, encryptor.encrypt('Demo Bank'), encryptor.encrypt('Spouse'),
-              'Checking', encryptor.encrypt('+1-800-111-2222'), encryptor.encrypt('Locker A1'),
-              'Keep $3k buffer', 5000.00, encryptor.encrypt('Main household account'),
-              datetime.now().date(), 'family-demo'))
+        """, (admin_id, "Bank Account", "Checking - Demo", "USA", "USD", 5000.00, enc("****1234"),
+              "Sample notes", "Admin User", 1, enc("Demo Bank"), enc("Spouse"),
+              "Checking", enc("+1-800-111-2222"), enc("Locker A1"),
+              "Keep $3k buffer", 5000.00, enc("Main household account"),
+              datetime.now().date(), "family-demo"))
 
         conn.commit()
         return "Initialized. Admin login: admin / password"
@@ -1126,7 +1123,7 @@ def init_db():
             conn.close()
 
 # -------------------------------------------------
-# App start (Render will use gunicorn app:app)
+# Entrypoint
 # -------------------------------------------------
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True)

@@ -203,27 +203,58 @@ def load_logged_in_user():
 # -------------------------------------------------
 # Utility: Exchange rates
 # -------------------------------------------------
-def get_exchange_rate(from_currency, to_currency="USD"):
-    if not EXCHANGE_RATE_API_KEY:
-        return 1.0 if from_currency == to_currency else 1.0
+def get_exchange_rate(from_currency: str, to_currency: str = "USD") -> float:
+    """
+    Returns the rate for: 1 {from_currency} = ? {to_currency}
+    Uses API first; if it fails, falls back to 83 for USD<->INR and 1.0 otherwise.
+    """
+    # Fast-path fallbacks
+    if from_currency == to_currency:
+        return 1.0
+
+    # Preferred API
     try:
+        # Example API used elsewhere in your app
         url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
         resp = requests.get(url, timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if data.get("result") == "success":
-            return data["conversion_rates"].get(to_currency, 1.0)
+            rate = data["conversion_rates"].get(to_currency)
+            if rate and rate > 0:
+                return float(rate)
     except Exception as e:
         print(f"Exchange API error: {e}", file=sys.stderr)
+
+    # Fallbacks
+    # If API fails, assume 1 USD = ₹83
+    if from_currency == "USD" and to_currency == "INR":
+        return 83.0
+    if from_currency == "INR" and to_currency == "USD":
+        return 1.0 / 83.0
+
+    # Neutral fallback (unknown pair)
     return 1.0
 
-def convert_to_usd(amount, currency):
+
+def convert_to_usd(amount, currency: str) -> float:
+    """
+    Convert an amount in {currency} to USD.
+    Correct behavior: amount * (rate for 1 currency -> USD).
+    """
     if amount is None:
         return 0.0
-    if currency == "USD":
-        return float(amount)
-    rate = get_exchange_rate(currency, "USD")
-    return float(amount) / rate if rate else 0.0
+    try:
+        amt = float(amount)
+    except Exception:
+        return 0.0
+
+    if (currency or "").upper() == "USD":
+        return amt
+
+    rate = get_exchange_rate((currency or "").upper(), "USD")
+    # IMPORTANT: multiply (not divide)
+    return amt * (rate if rate else 0.0)
 
 # -------------------------------------------------
 # Common choice lists
@@ -1190,4 +1221,5 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 

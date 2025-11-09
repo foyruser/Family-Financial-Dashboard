@@ -8,8 +8,9 @@ import os
 import sys
 import secrets
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 import smtplib
-from email.message import EmailMessage # Used for robust email body/headers
+from cryptography.fernet import Fernet
 
 # --- APPLICATION INITIALIZATION & CONFIG ---
 app = Flask(__name__)
@@ -30,7 +31,6 @@ MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD') # Your App Password
 MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', 'Family Dashboard Admin')
 
 # --- ENCRYPTOR IMPLEMENTATION ---
-from cryptography.fernet import Fernet
 class Encryptor:
     """Handles field-level encryption and decryption using Fernet."""
     def __init__(self, key):
@@ -42,7 +42,6 @@ class Encryptor:
         """Encrypts data. Returns None if data is None or empty."""
         if data is None or data == '':
             return None
-        # data is encoded to bytes, encrypted, and then decoded to string for DB storage
         try:
             return self.f.encrypt(data.encode()).decode()
         except Exception as e:
@@ -53,12 +52,9 @@ class Encryptor:
         """Decrypts a token. Returns empty string if token is None or empty."""
         if token is None or token == '':
             return ''
-        # token (string) is encoded to bytes, decrypted, and then decoded to string
         try:
             return self.f.decrypt(token.encode()).decode()
         except Exception as e:
-            # Important: Handle possible invalid token/key/padding error gracefully
-            # This can happen if data was encrypted with a different key or corrupted
             print(f"Decryption error for token: {e}", file=sys.stderr)
             return '--- DECRYPTION ERROR ---'
 
@@ -188,13 +184,15 @@ def check_user_access():
     return None
 
 def get_group_filter_clause(role, group_id, table_name):
-    """Returns the SQL WHERE clause and parameters for group-level data filtering."""
-    if role == 'admin':
-        # Admin can see everything, though we usually just filter by a designated 'admin' group
-        return 'AND %s.group_id = %s', ('users',) # Admins are typically their own group/no filter needed
-    elif group_id:
+    """
+    Returns the SQL WHERE clause and parameters for group-level data filtering.
+    """
+    if group_id and group_id != 'pending-group':
+        # Admins and regular users are filtered by their group_id
         return f'AND {table_name}.group_id = %s', (group_id,)
-    return '', () # Should not happen if authenticated properly
+    
+    # Fallback for users without a proper group_id (e.g., system admin or newly registered)
+    return '', () 
 
 
 # --- CONTEXT PROCESSORS (For Template variables used globally) ---
@@ -207,20 +205,34 @@ def inject_global_vars():
     countries = ['USA', 'Canada', 'UK', 'India', 'Germany', 'Japan', 'Other']
     return dict(currencies=currencies, categories=categories, asset_types=asset_types, countries=countries)
 
+@app.context_processor
+def inject_user_for_templates():
+    """Injects g.user as 'current_user' to satisfy template expectations (like Flask-Login)."""
+    return dict(current_user=g.user)
+
 def get_owners():
     """Fetches list of owners for dropdowns."""
     conn = get_db_connection()
     if not conn: return []
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT id, name FROM owners ORDER BY name;')
+        # Fetch only owners associated with the user's group
+        # Use a simplified filter for the Owners table, which we assume is group-specific.
+        where_clause = 'WHERE TRUE'
+        group_params = ()
+        if g.group_id and g.group_id != 'pending-group':
+             where_clause = 'WHERE group_id = %s'
+             group_params = (g.group_id,)
+        
+        cur.execute(f'SELECT id, name FROM owners {where_clause} ORDER BY name;', group_params)
         owners = cur.fetchall()
         return owners
     except Exception as e:
         print(f"Error fetching owners: {e}", file=sys.stderr)
         return []
     finally:
-        cur.close(); conn.close()
+        if 'cur' in locals(): cur.close() 
+        if conn: conn.close()
 
 
 # --- CURRENCY API UTILITY ---
@@ -260,7 +272,7 @@ def login():
             return render_template('login.html')
 
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute('SELECT id, username, password_hash, role, group_id FROM users WHERE username = %s;', (username,))
+        cur.execute('SELECT id, username, password_hash, role, group_id FROM users WHERE id = %s;', (username,))
         user = cur.fetchone()
         cur.close()
         conn.close()
@@ -566,6 +578,7 @@ def home():
         """, group_params)
         assets_by_currency = {item['currency']: float(item['total_value'] or 0) for item in cur.fetchall()}
 
+        # Note the table name change in group_filter replacement for expenses
         cur.execute(f"""
             SELECT currency, SUM(amount) as total_amount
             FROM expenses 
@@ -575,24 +588,44 @@ def home():
         expenses_by_currency = {item['currency']: float(item['total_amount'] or 0) for item in cur.fetchall()}
         
         # 2. Get Exchange Rates (Base to USD for simplification)
-        # Note: We fetch rates for 'USD' base.
         rates = get_exchange_rates('USD') 
         
         if not rates:
             flash("Could not fetch live exchange rates. Displaying sums without conversion.", 'warning')
-            rates = {c: (1.0 if c == 'USD' else 0) for c in assets_by_currency.keys() | expenses_by_currency.keys()} # Fallback
+            rates = {c: (1.0 if c == 'USD' else 0) for c in assets_by_currency.keys() | expenses_by_currency.keys()}
 
-        total_asset_usd = sum(value / rates.get(currency, 0) for currency, value in assets_by_currency.items() if rates.get(currency, 0) != 0)
-        total_expense_usd = sum(value / rates.get(currency, 0) for currency, value in expenses_by_currency.items() if rates.get(currency, 0) != 0)
+        # Calculate Total Asset Value in USD
+        total_asset_usd = 0
+        for currency, value in assets_by_currency.items():
+            rate = rates.get(currency, 0)
+            if rate != 0:
+                if currency == 'USD':
+                    total_asset_usd += value
+                else:
+                    # Conversion: Value_in_USD = Value_in_Currency / (Rate of USD to Currency)
+                    total_asset_usd += value / rate
+
+        # Calculate Total Expense Value in USD
+        total_expense_usd = 0
+        for currency, value in expenses_by_currency.items():
+            rate = rates.get(currency, 0)
+            if rate != 0:
+                if currency == 'USD':
+                    total_expense_usd += value
+                else:
+                    total_expense_usd += value / rate
+
         
         # Convert total USD to INR for the secondary metric
-        usd_to_inr = rates.get('INR') / rates.get('USD', 1) if rates.get('USD') else 0
+        usd_rate = rates.get('USD', 1.0)
+        # Avoid division by zero if USD rate is somehow 0
+        usd_to_inr = rates.get('INR', 0) / usd_rate if usd_rate != 0 and rates.get('INR') else 0
         
         dashboard_data = {
             'total_asset_usd': round(total_asset_usd, 2),
             'total_expense_usd': round(total_expense_usd, 2),
             'net_worth_usd': round(total_asset_usd - total_expense_usd, 2),
-            'net_worth_inr': round((total_asset_usd - total_expense_usd) * usd_to_inr, 2),
+            'net_worth_inr': round((total_asset_usd - total_expense_usd) * usd_to_inr, 2) if usd_to_inr else 'N/A',
             'assets_by_currency': assets_by_currency,
             'expenses_by_currency': expenses_by_currency,
             'reporting_currency': 'USD',
@@ -623,7 +656,7 @@ def index():
         flash("Database connection error.", 'error'); return render_template('index.html', assets=[])
     
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
+    group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'a')
     
     try:
         cur.execute(f"""

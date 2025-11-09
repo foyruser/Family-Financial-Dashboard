@@ -1,102 +1,90 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <title>Expenses - Dream Bee Network</title>
-  <style>
-    body {
-      background-image: url('https://images.unsplash.com/photo-1506744038136-46273834b3fb?ixlib=rb-4.0.3&auto=format&fit=crop&w=1950&q=80');
-      background-size: cover;
-      background-repeat: no-repeat;
-      background-attachment: fixed;
-      padding: 20px;
-      font-family: Arial, sans-serif;
-      color: #333;
-    }
-    nav {
-      margin-bottom: 20px;
-    }
-    nav a {
-      background-color: #fff;
-      padding: 6px 12px;
-      border-radius: 4px;
-      text-decoration: none;
-      color: #333;
-      font-weight: bold;
-      margin-right: 10px;
-    }
-    h1 {
-      color: white;
-      text-shadow: 2px 2px 4px #000;
-      margin-bottom: 10px;
-    }
-    a.add-btn {
-      display: inline-block;
-      margin-bottom: 15px;
-      padding: 8px 12px;
-      background-color: #fff;
-      color: #333;
-      text-decoration: none;
-      border-radius: 4px;
-    }
-    table {
-      background-color: rgba(255,255,255,0.85);
-      border-collapse: collapse;
-      width: 100%;
-    }
-    th, td {
-      border: 1px solid #ccc;
-      padding: 8px;
-      text-align: left;
-    }
-    th a {
-      text-decoration: none;
-      color: #333;
-    }
-    th a:hover {
-      color: #007BFF;
-    }
-    form button {
-      background: none;
-      border: none;
-      cursor: pointer;
-      color: red;
-      font-size: 1.1em;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expenses - Dream Bee Network</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Keeping font family here for consistency */
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+    </style>
 </head>
-<body>
-  <h1>Dream Bee Network - Expenses</h1>
-  <nav>
-    <a href="/home">Home</a>
-    <a href="/">Assets</a>
-    <a href="/expenses" class="active">Expenses</a>
-  </nav>
-  <a href="/add_expense" class="add-btn">Add New Expense</a>
-  <table>
-    <tr>
-      <th><a href="{{ url_for('expenses', sort_by='description', order='asc' if sort_by != 'description' or order == 'desc' else 'desc') }}">Description{% if sort_by == 'description' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
-      <th><a href="{{ url_for('expenses', sort_by='category', order='asc' if sort_by != 'category' or order == 'desc' else 'desc') }}">Category{% if sort_by == 'category' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
-      <th><a href="{{ url_for('expenses', sort_by='amount', order='asc' if sort_by != 'amount' or order == 'desc' else 'desc') }}">Amount{% if sort_by == 'amount' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
-      <th><a href="{{ url_for('expenses', sort_by='currency', order='asc' if sort_by != 'currency' or order == 'desc' else 'desc') }}">Currency{% if sort_by == 'currency' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
-      <th><a href="{{ url_for('expenses', sort_by='expense_date', order='asc' if sort_by != 'expense_date' or order == 'desc' else 'desc') }}">Date{% if sort_by == 'expense_date' %} {% if order == 'asc' %}▲{% else %}▼{% endif %}{% endif %}</a></th>
-      <th>Notes</th>
-      <th>Action</th>
-    </tr>
-    {% for expense in expenses %}
-    <tr>
-      <td>{{ expense.description }}</td>
-      <td>{{ expense.category }}</td>
-      <td>{{ expense.amount }}</td>
-      <td>{{ expense.currency }}</td>
-      <td>{{ expense.expense_date }}</td>
-      <td>{{ expense.notes }}</td>
-      <td>
-        <form method="POST" action="/delete_expense/{{ expense.id }}" onsubmit="return confirm('Delete this expense?');">
-          <button type="submit" title="Delete">&#10060;</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto bg-white p-6 rounded-xl shadow-2xl">
+
+        <header class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-gray-300">
+            <div class="mb-4 sm:mb-0">
+                <h1 class="text-3xl font-extrabold text-gray-800">Family Expenses Tracker</h1>
+                <p class="text-gray-500">A detailed list of transactions and liabilities.</p>
+            </div>
+            <nav class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4 items-start sm:items-center">
+                <a href="{{ url_for('home') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Dashboard</a>
+                <a href="{{ url_for('index') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Assets</a>
+                <a href="{{ url_for('expenses') }}" class="px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg shadow-md">Expenses</a>
+                <a href="{{ url_for('change_password') }}" class="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors shadow-sm">Change Password</a>
+                <a href="{{ url_for('logout') }}" class="ml-3 px-3 py-1 text-sm bg-red-100 text-red-700 font-semibold rounded-lg hover:bg-red-200 transition-colors shadow-sm">Logout</a>
+            </nav>
+        </header>
+
+        <div class="mb-6">
+            <a href="{{ url_for('add_expense') }}" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors">
+                <svg class="-ml-1 mr-2 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />
+                </svg>
+                Add New Expense
+            </a>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-lg overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead>
+                    <tr>
+                        {% set base_url = url_for('expenses') %}
+                        {% macro sort_header(column, display_name) %}
+                            {% set new_order = 'asc' if sort_by != column or order == 'desc' else 'desc' %}
+                            <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" 
+                                onclick="window.location='{{ base_url }}?sort_by={{ column }}&order={{ new_order }}'">
+                                {{ display_name }}
+                                {% if sort_by == column %} 
+                                    {% if order == 'asc' %}▲{% else %}▼{% endif %}
+                                {% endif %}
+                            </th>
+                        {% endmacro %}
+                        
+                        {{ sort_header('description', 'Description') }}
+                        {{ sort_header('category', 'Category') }}
+                        {{ sort_header('amount', 'Amount') }}
+                        {{ sort_header('currency', 'Currency') }}
+                        {{ sort_header('expense_date', 'Date') }}
+                        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Notes</th>
+                        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    {% for expense in expenses %}
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ expense.description }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ expense.category }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-red-600">{{ "{:,.2f}".format(expense.amount|float) }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ expense.currency }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ expense.expense_date }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-500">{{ expense.notes }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium flex space-x-2">
+                            <a href="{{ url_for('edit_expense', expense_id=expense.id) }}" class="text-indigo-600 hover:text-indigo-900 text-xs font-semibold">
+                                Edit
+                            </a>
+                            <form method="POST" action="{{ url_for('delete_expense', expense_id=expense.id) }}" onsubmit="return confirm('Are you sure you want to delete this expense?');">
+                                <button type="submit" class="text-red-600 hover:text-red-900 text-xs font-semibold" title="Delete">
+                                    Delete
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 </body>
 </html>

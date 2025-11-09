@@ -272,7 +272,7 @@ def login():
             return render_template('login.html')
 
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        # FIX APPLIED: Correctly search by 'username' (which holds the email string), not the integer 'id'
+        # Fix: Correctly search by 'username' (which holds the email string), not the integer 'id'
         cur.execute('SELECT id, username, password_hash, role, group_id FROM users WHERE username = %s;', (username,))
         user = cur.fetchone()
         cur.close()
@@ -364,7 +364,7 @@ def forgot_password():
 
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # FIX APPLIED: Find the user by the input string (username/email)
+        # Find the user by the input string (username/email)
         cur.execute('SELECT id, email, username FROM users WHERE username = %s OR email = %s;', 
                     (username_or_email, username_or_email))
         user = cur.fetchone()
@@ -378,7 +378,7 @@ def forgot_password():
             expiration = datetime.now() + timedelta(hours=1)
             
             try:
-                # FIX APPLIED: Use the retrieved integer 'user['id']' for the UPDATE WHERE clause
+                # Use the retrieved integer 'user['id']' for the UPDATE WHERE clause
                 user_email = user['email']
                 
                 cur.execute('UPDATE users SET reset_token = %s, token_expiration = %s WHERE id = %s;', 
@@ -568,9 +568,22 @@ def home():
     access_denied_response = check_user_access()
     if access_denied_response: return access_denied_response
     
+    # Initialize dashboard data with defaults to prevent template errors if any calculation fails
+    default_dashboard_data = {
+        'total_asset_usd': 0.0,
+        'total_expense_usd': 0.0,
+        'net_worth_usd': 0.0,
+        'net_worth_inr': 'N/A',
+        'assets_by_currency': {},
+        'expenses_by_currency': {},
+        'reporting_currency': 'USD',
+        'secondary_currency': 'INR'
+    }
+    dashboard_data = default_dashboard_data
+    
     conn = get_db_connection()
     if not conn:
-        flash("Database connection failure.", 'error'); return render_template('home.html', dashboard_data={})
+        flash("Database connection failure.", 'error'); return render_template('home.html', dashboard_data=dashboard_data)
 
     cur = conn.cursor(cursor_factory=RealDictCursor)
     group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'assets')
@@ -641,8 +654,8 @@ def home():
 
     except Exception as e:
         print(f"Dashboard calculation error: {e}", file=sys.stderr)
-        flash("Error calculating financial summaries.", 'error')
-        dashboard_data = {}
+        flash("Error calculating financial summaries. Displaying zeros.", 'error')
+        # dashboard_data remains the default zeroed dictionary from initialization
     finally:
         cur.close()
         conn.close()

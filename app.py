@@ -4,7 +4,6 @@ from flask_wtf import CSRFProtect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
-from flask_login import login_required
 
 import os
 import sys
@@ -24,12 +23,6 @@ from cryptography.fernet import Fernet
 # App & Config
 # -------------------------------------------------
 app = Flask(__name__)
-
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    return redirect(url_for("home"))
 
 # Secret keys (provide via Render env)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY", "a_long_random_fallback_key")
@@ -109,7 +102,6 @@ def dec(v):
     s = str(v)
     if looks_encrypted(s):
         out = encryptor.decrypt(s)
-        # If unreadable token, keep placeholder
         return out if out != "[unreadable]" else "[unreadable]"
     # legacy plaintext kept as-is
     return s
@@ -133,7 +125,8 @@ def get_db_connection():
         raise RuntimeError("DATABASE_URL is not set")
     return psycopg2.connect(DATABASE_URL)
 
-def login_required(view):
+# Single, consistent auth decorator (no Flask-Login)
+def auth_required(view):
     @functools.wraps(view)
     def wrapped_view(**kwargs):
         if "user_id" not in session:
@@ -215,34 +208,37 @@ def get_exchange_rate(from_currency: str, to_currency: str = "USD") -> float:
     Returns the rate for: 1 {from_currency} = ? {to_currency}
     Uses API first; if it fails, falls back to 83 for USD<->INR and 1.0 otherwise.
     """
-    # Fast-path fallbacks
     if from_currency == to_currency:
         return 1.0
 
-    # Preferred API
+    # Preferred API: Exchangerate-API (v6)
     try:
-        # Example API used elsewhere in your app
-        url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("result") == "success":
-            rate = data["conversion_rates"].get(to_currency)
-            if rate and rate > 0:
-                return float(rate)
+        if EXCHANGE_RATE_API_KEY:
+            url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
+            resp = requests.get(url, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("result") == "success":
+                rate = data["conversion_rates"].get(to_currency)
+                if rate and rate > 0:
+                    return float(rate)
+        else:
+            # Fallback public endpoint (USD base); limited but fine for USD/INR pair
+            if from_currency.upper() == "USD":
+                r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5).json()
+                rate = r.get("rates", {}).get(to_currency.upper())
+                if rate and rate > 0:
+                    return float(rate)
     except Exception as e:
         print(f"Exchange API error: {e}", file=sys.stderr)
 
-    # Fallbacks
-    # If API fails, assume 1 USD = ₹83
-    if from_currency == "USD" and to_currency == "INR":
+    # Hard fallbacks
+    if from_currency.upper() == "USD" and to_currency.upper() == "INR":
         return 83.0
-    if from_currency == "INR" and to_currency == "USD":
+    if from_currency.upper() == "INR" and to_currency.upper() == "USD":
         return 1.0 / 83.0
 
-    # Neutral fallback (unknown pair)
     return 1.0
-
 
 def convert_to_usd(amount, currency: str) -> float:
     """
@@ -260,7 +256,6 @@ def convert_to_usd(amount, currency: str) -> float:
         return amt
 
     rate = get_exchange_rate((currency or "").upper(), "USD")
-    # IMPORTANT: multiply (not divide)
     return amt * (rate if rate else 0.0)
 
 # -------------------------------------------------
@@ -286,7 +281,7 @@ def healthz():
 # Home / Dashboard
 # -------------------------------------------------
 @app.route("/")
-@login_required
+@auth_required
 def home():
     summary = {
         "total_assets_usd": 0.0,
@@ -331,7 +326,11 @@ def home():
 
     return render_template("home.html", summary=summary, user_role=g.user_role, group_id=g.group_id)
 
-
+# Keep /dashboard but reuse the working home
+@app.route("/dashboard")
+@auth_required
+def dashboard():
+    return redirect(url_for("home"))
 
 # -------------------------------------------------
 # Auth
@@ -340,17 +339,17 @@ def home():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id, password_hash, activate FROM users WHERE username=%s;", (username,))
+            cur.execute("SELECT id, username, password_hash, activate FROM users WHERE lower(username)=lower(%s);", (username,))
             user = cur.fetchone()
             if user and bcrypt.check_password_hash(user["password_hash"], password):
                 session["user_id"] = user["id"]
-                session["username"] = username
+                session["username"] = user["username"]
                 if not user["activate"]:
                     return redirect(url_for("pending_approval"))
                 flash("Login successful.", "success")
@@ -370,23 +369,42 @@ def login():
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
+        username = (request.form.get("username") or "").strip().lower()
+        password = request.form.get("password") or ""
         email = username  # treat username as email
         phash = bcrypt.generate_password_hash(password).decode("utf-8")
         role = "Member"
         conn = None
         try:
             conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("""
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+
+            # pre-check for better UX
+            cur.execute("SELECT id, activate FROM users WHERE lower(username)=lower(%s);", (username,))
+            existing = cur.fetchone()
+            if existing:
+                if not existing["activate"]:
+                    flash("This account exists but is pending approval.", "warning")
+                    session["user_id"] = existing["id"]
+                    session["username"] = username
+                    return redirect(url_for("pending_approval"))
+                flash("That username already exists. Try Forgot Password.", "error")
+                return render_template("register.html")
+
+            cur2 = conn.cursor()
+            cur2.execute("""
                 INSERT INTO users (username, email, password_hash, user_role, group_id, activate)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id;
             """, (username, email, phash, role, None, False))
-            uid = cur.fetchone()[0]
+            uid = cur2.fetchone()["id"] if isinstance(cur2.fetchone(), dict) else cur2.fetchone()
+            # The above could be None due to cursor factory; use a new fetch:
             conn.commit()
-            session["user_id"] = uid
+
+            # Store to session using a second query to be safe
+            cur.execute("SELECT id FROM users WHERE lower(username)=lower(%s);", (username,))
+            row = cur.fetchone()
+            session["user_id"] = row["id"] if isinstance(row, dict) else row[0]
             session["username"] = username
             return redirect(url_for("pending_approval"))
         except psycopg2.IntegrityError:
@@ -402,12 +420,12 @@ def register():
     return render_template("register.html")
 
 @app.route("/pending_approval")
-@login_required
+@auth_required
 def pending_approval():
     return render_template("pending_approval.html")
 
 @app.route("/logout")
-@login_required
+@auth_required
 def logout():
     session.clear()
     flash("You have been logged out.", "success")
@@ -444,12 +462,12 @@ def send_email(to_email, subject, html_body):
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
     if request.method == "POST":
-        username = request.form["username"]
+        username = request.form.get("username") or ""
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id, email FROM users WHERE username=%s;", (username,))
+            cur.execute("SELECT id, email FROM users WHERE lower(username)=lower(%s);", (username,))
             user = cur.fetchone()
             if not user:
                 flash("If the account exists, a reset link has been sent.", "success")
@@ -492,7 +510,7 @@ def reset_password(token):
             flash("Invalid or expired token.", "error")
             return redirect(url_for("login"))
         if request.method == "POST":
-            password = request.form["password"]
+            password = request.form.get("password") or ""
             phash = bcrypt.generate_password_hash(password).decode("utf-8")
             cur2 = conn.cursor()
             cur2.execute("UPDATE users SET password_hash=%s, reset_token=NULL, token_expiration=NULL WHERE id=%s;", (phash, user["id"]))
@@ -513,7 +531,7 @@ def reset_password(token):
 # Profile & Change password
 # -------------------------------------------------
 @app.route("/profile")
-@login_required
+@auth_required
 def profile():
     conn = None
     user = {"username": g.username, "email": None, "group_id": g.group_id}
@@ -534,12 +552,12 @@ def profile():
     return render_template("profile.html", user=user)
 
 @app.route("/change_password", methods=["GET", "POST"])
-@login_required
+@auth_required
 def change_password():
     if request.method == "POST":
-        current = request.form["current_password"]
-        new = request.form["new_password"]
-        confirm = request.form["confirm_password"]
+        current = request.form.get("current_password") or ""
+        new = request.form.get("new_password") or ""
+        confirm = request.form.get("confirm_password") or ""
         if new != confirm:
             flash("New passwords do not match.", "error")
             return render_template("change_password.html")
@@ -572,14 +590,14 @@ def change_password():
 # Group management
 # -------------------------------------------------
 @app.route("/group")
-@login_required
+@auth_required
 def group_management():
     is_default = g.group_id is None
     return render_template("group_management.html", username=g.username, group_id=g.group_id, is_default_group=is_default)
 
 @limiter.limit("10 per hour")
 @app.route("/create_group", methods=["POST"])
-@login_required
+@auth_required
 def create_group():
     new_gid = f"family-{secrets.token_urlsafe(4)}"
     conn = None
@@ -601,7 +619,7 @@ def create_group():
 
 @limiter.limit("10 per hour")
 @app.route("/join_group", methods=["POST"])
-@login_required
+@auth_required
 def join_group():
     target_gid = request.form.get("target_group_id")
     if not target_gid:
@@ -629,7 +647,7 @@ def join_group():
 # -------------------------------------------------
 @limiter.limit("10 per hour")
 @app.route("/admin/approve_users", methods=["GET", "POST"])
-@login_required
+@auth_required
 @admin_required
 def admin_approve_users():
     conn = None
@@ -662,7 +680,7 @@ def admin_approve_users():
 # Expenses
 # -------------------------------------------------
 @app.route("/expenses")
-@login_required
+@auth_required
 def expenses():
     conn = None
     rows = []
@@ -696,15 +714,15 @@ def expenses():
     return render_template("expenses.html", expenses=rows)
 
 @app.route("/add_expense", methods=["GET", "POST"])
-@login_required
+@auth_required
 def add_expense():
     lists = get_common_lists()
     if request.method == "POST":
-        description = request.form["description"]
-        amount = request.form["amount"]
-        currency = request.form["currency"]
-        category = request.form["category"]
-        expense_date = request.form["expense_date"]
+        description = request.form.get("description")
+        amount = request.form.get("amount")
+        currency = request.form.get("currency")
+        category = request.form.get("category")
+        expense_date = request.form.get("expense_date")
         conn = None
         try:
             conn = get_db_connection()
@@ -727,7 +745,7 @@ def add_expense():
     return render_template("add_expense.html", categories=lists["expense_categories"], currencies=lists["currencies"])
 
 @app.route("/edit_expense/<int:expense_id>", methods=["GET", "POST"])
-@login_required
+@auth_required
 def edit_expense(expense_id):
     lists = get_common_lists()
     conn = None
@@ -746,11 +764,11 @@ def edit_expense(expense_id):
             return redirect(url_for("expenses"))
 
         if request.method == "POST":
-            description = request.form["description"]
-            amount = request.form["amount"]
-            currency = request.form["currency"]
-            category = request.form["category"]
-            expense_date = request.form["expense_date"]
+            description = request.form.get("description")
+            amount = request.form.get("amount")
+            currency = request.form.get("currency")
+            category = request.form.get("category")
+            expense_date = request.form.get("expense_date")
             cur2 = conn.cursor()
             cur2.execute(f"""
                 UPDATE expenses
@@ -779,7 +797,7 @@ def edit_expense(expense_id):
             conn.close()
 
 @app.route("/delete_expense/<int:expense_id>", methods=["POST"])
-@login_required
+@auth_required
 def delete_expense(expense_id):
     conn = None
     try:
@@ -808,7 +826,7 @@ def delete_expense(expense_id):
 SENSITIVE_ASSET_FIELDS = ["account_no", "beneficiary_name", "contact_phone", "document_location", "description"]
 
 @app.route("/assets")
-@login_required
+@auth_required
 def assets():
     conn = None
     rows = []
@@ -847,20 +865,21 @@ def assets():
             except: pass
             conn.close()
 
-    # -------- USD equivalent (API with INR fallback) --------
-    # We only need INR->USD for your current data; if you later add other currencies
-    # you can extend this to fetch per-currency rates once and cache.
+    # -------- USD equivalent (API with INR fallback to 83) --------
     inr_to_usd = None
     try:
-        # Try a quick public rate (keep short timeout)
-        import requests
-        res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
-        data = res.json()
-        usd_to_inr = data["rates"]["INR"]  # 1 USD = X INR
-        inr_to_usd = 1.0 / float(usd_to_inr)
+        # Prefer your configured API key if present
+        if EXCHANGE_RATE_API_KEY:
+            usd_to_inr = get_exchange_rate("USD", "INR")  # this already uses API if available
+            inr_to_usd = 1.0 / float(usd_to_inr) if usd_to_inr else 1.0 / 83.0
+        else:
+            res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
+            data = res.json()
+            usd_to_inr = data["rates"]["INR"]  # 1 USD = X INR
+            inr_to_usd = 1.0 / float(usd_to_inr)
     except Exception as e:
         print("FX fetch failed; using fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
-        inr_to_usd = 1.0 / 83.0  # fallback: 1 INR ≈ 0.012048 USD
+        inr_to_usd = 1.0 / 83.0
 
     for r in rows:
         curr = (r.get("currency") or "").upper()
@@ -874,12 +893,10 @@ def assets():
         elif curr == "INR":
             r["usd_value"] = round(val * inr_to_usd, 2)
         else:
-            # Unknown currency → no conversion (show None so it's sortable as 0)
             r["usd_value"] = None
 
     # -------- Sorting --------
     # ?sort=<field>&order=asc|desc
-    # Supported sort fields:
     sortable_fields = {
         "name", "type", "country", "currency", "last_updated",
         "usd_value", "current_value", "added_date"
@@ -895,16 +912,13 @@ def assets():
 
     def sort_key(r):
         v = r.get(sort_by)
-        # Normalize for robust sorting
         if sort_by in ("usd_value", "current_value"):
             try:
                 return float(v or 0.0)
             except Exception:
                 return 0.0
-        # Dates are strings "YYYY-MM-DD" now; sort lexicographically works fine
         if sort_by in ("last_updated", "added_date"):
             return v or ""
-        # Strings
         return (str(v or "")).lower()
 
     rows = sorted(rows, key=sort_key, reverse=reverse)
@@ -912,7 +926,7 @@ def assets():
     return render_template("assets.html", assets=rows, sort_by=sort_by, order=order)
 
 @app.route("/add_asset", methods=["GET", "POST"])
-@login_required
+@auth_required
 def add_asset():
     lists = get_common_lists()
     if request.method == "POST":
@@ -973,7 +987,7 @@ def add_asset():
     )
 
 @app.route("/edit_asset/<int:asset_id>", methods=["GET", "POST"])
-@login_required
+@auth_required
 def edit_asset(asset_id):
     lists = get_common_lists()
     conn = None
@@ -1027,7 +1041,7 @@ def edit_asset(asset_id):
                 flash("Asset updated.", "success")
                 return redirect(url_for("assets"))
 
-        # decrypt for form display (legacy plaintext is okay)
+        # decrypt for form display
         for f in SENSITIVE_ASSET_FIELDS:
             asset[f] = dec(asset.get(f))
         return render_template(
@@ -1049,7 +1063,7 @@ def edit_asset(asset_id):
             conn.close()
 
 @app.route("/delete_asset/<int:asset_id>", methods=["POST"])
-@login_required
+@auth_required
 def delete_asset(asset_id):
     conn = None
     try:
@@ -1073,7 +1087,7 @@ def delete_asset(asset_id):
     return redirect(url_for("assets"))
 
 # -------------------------------------------------
-# Dev helper: init_db (optional)
+# Dev helper: init_db (optional, dangerous in prod)
 # -------------------------------------------------
 @app.route("/init_db")
 def init_db():
@@ -1185,8 +1199,3 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
-
-
-
-
-

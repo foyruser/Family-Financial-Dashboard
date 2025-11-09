@@ -7,21 +7,21 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
+        /* Keeping font family here for safety, removing custom card/flash styles */
         body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
-        .card { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06); }
-        .flash-success { background-color: #d1fae5; color: #065f46; }
-        .flash-error { background-color: #fee2e2; color: #991b1b; }
-        .flash-warning { background-color: #fef3c7; color: #b45309; }
     </style>
 </head>
 <body class="min-h-screen p-4 sm:p-8">
 
-    <!-- Flash Messages -->
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-            <div class="mb-6 space-y-2">
+            <div class="mb-6 space-y-2 max-w-4xl mx-auto">
             {% for category, message in messages %}
-                <div class="p-3 text-sm rounded-lg border {% if category == 'success' %}flash-success border-green-300{% elif category == 'error' %}flash-error border-red-300{% elif category == 'warning' %}flash-warning border-amber-300{% endif %}">
+                <div class="p-3 text-sm rounded-lg border 
+                    {% if category == 'success' %}bg-green-100 text-green-700 border-green-300
+                    {% elif category == 'error' %}bg-red-100 text-red-700 border-red-300
+                    {% elif category == 'warning' %}bg-amber-100 text-amber-700 border-amber-300
+                    {% endif %}">
                     {{ message }}
                 </div>
             {% endfor %}
@@ -32,11 +32,10 @@
     <div class="max-w-4xl mx-auto">
         <header class="mb-8 flex justify-between items-center">
             <h1 class="text-3xl font-bold text-gray-800">Family Group Management</h1>
-            <a href="{{ url_for('index') }}" class="text-sm text-blue-600 hover:text-blue-800 font-medium">← Back to Dashboard</a>
+            <a href="{{ url_for('home') }}" class="text-sm text-blue-600 hover:text-blue-800 font-medium">← Back to Dashboard</a>
         </header>
 
-        <!-- Current Status Card -->
-        <div class="bg-white p-6 rounded-xl card mb-8 border border-gray-200">
+        <div class="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
             <h2 class="text-xl font-semibold mb-3 text-gray-700">Your Current Status</h2>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="p-4 bg-blue-50 rounded-lg">
@@ -56,11 +55,9 @@
         </div>
 
         {% if is_default_group %}
-        <!-- Options: Create or Join -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
             
-            <!-- Create New Group -->
-            <div class="bg-white p-6 rounded-xl card border border-gray-200">
+            <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
                 <h3 class="text-xl font-semibold mb-4 text-gray-700 flex items-center">
                     <svg class="w-6 h-6 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                     Create a New Family Group
@@ -73,8 +70,7 @@
                 </form>
             </div>
 
-            <!-- Join Existing Group -->
-            <div class="bg-white p-6 rounded-xl card border border-gray-200">
+            <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
                 <h3 class="text-xl font-semibold mb-4 text-gray-700 flex items-center">
                     <svg class="w-6 h-6 mr-2 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                     Join an Existing Group
@@ -82,8 +78,8 @@
                 <p class="text-gray-600 mb-4 text-sm">Enter the Group ID shared by a family member to join their financial group.</p>
                 <form action="{{ url_for('join_group') }}" method="POST">
                     <input type="text" id="target_group_id" name="target_group_id" required 
-                           placeholder="Enter Group ID (e.g., family-ab01c2)"
-                           class="w-full p-2.5 mb-4 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500">
+                            placeholder="Enter Group ID (e.g., family-ab01c2)"
+                            class="w-full p-2.5 mb-4 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500">
                     <button type="submit" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2.5 px-4 rounded-lg transition duration-150 ease-in-out">
                         Join Group
                     </button>

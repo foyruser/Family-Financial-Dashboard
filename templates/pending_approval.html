@@ -3,24 +3,40 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Approval Pending</title>
+    <title>Pending Approval - Dream Bee Network</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Consistent font and background color */
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+    </style>
 </head>
-<body class="flex items-center justify-center min-h-screen p-4 bg-gray-100">
-    <div class="max-w-md w-full bg-white p-8 rounded-xl shadow-2xl text-center">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 text-yellow-500 mx-auto mb-4" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-        </svg>
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Account Awaiting Approval</h1>
+<body class="min-h-screen flex items-center justify-center p-4">
+
+    <div class="w-full max-w-lg bg-white p-8 rounded-xl shadow-2xl border-t-4 border-yellow-500 text-center">
+        
+        <div class="text-6xl text-yellow-500 mb-4">
+            ⚠️
+        </div>
+
+        <h2 class="text-3xl font-extrabold text-gray-800 mb-4">Account Pending Approval</h2>
+        
         <p class="text-gray-600 mb-6">
-            Thank you for registering! Your account has been successfully created, but it requires approval from an administrator before you can log in and access the system.
+            Thank you for registering! Your account, **{{ session.get('username', 'User') }}**, is currently in a pending state.
         </p>
+
+        <p class="text-lg font-semibold text-gray-700 mb-8 p-3 bg-yellow-50 rounded-lg border border-yellow-200">
+            An administrator has been notified and must approve your account before you can access the Family Financial Dashboard.
+        </p>
+
         <p class="text-sm text-gray-500 mb-8">
-            Please check back soon or contact your administrator for more information.
+            You will receive an email notification once your account has been activated and assigned to a family group. Please check back later.
         </p>
-        <a href="{{ url_for('login') }}" class="inline-block px-6 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition duration-150 shadow-md">
-            Return to Login
+
+        <a href="{{ url_for('logout') }}"
+           class="inline-block bg-gray-200 text-gray-700 font-bold py-2 px-6 rounded-lg hover:bg-gray-300 transition-colors shadow-md">
+            Log Out
         </a>
     </div>
+
 </body>
 </html>

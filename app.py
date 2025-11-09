@@ -50,8 +50,6 @@ class Encryptor:
 encryptor = Encryptor(FERNET_KEY)
 
 # --- TEMPLATE DEFINITIONS (REQUIRED FOR SINGLE-FILE COMPLETENESS) ---
-# NOTE: In a real Flask app, these would be separate .html files in a 'templates' folder.
-# They are included here as minimal strings to make this single file runnable and complete.
 
 BASE_HTML = """
 <!DOCTYPE html>
@@ -110,7 +108,7 @@ HTML_TEMPLATES = {
                 <input type="password" id="password" name="password" required>
             </div>
             <button type="submit">Log In</button>
-            <p><a href="{url_for('register')}">Register</a> | <a href="{url_for('forgot_password')}">Forgot Password?</a></p>
+            <p><a href="{register_url}">Register</a> | <a href="{forgot_password_url}">Forgot Password?</a></p>
         </form>
         """
     },
@@ -128,7 +126,7 @@ HTML_TEMPLATES = {
                 <input type="password" id="password" name="password" required>
             </div>
             <button type="submit">Register</button>
-            <p><a href="{url_for('login')}">Back to Login</a></p>
+            <p><a href="{login_url}">Back to Login</a></p>
         </form>
         """
     },
@@ -143,7 +141,7 @@ HTML_TEMPLATES = {
                 <input type="email" id="email" name="email" required>
             </div>
             <button type="submit">Send Reset Link</button>
-            <p><a href="{url_for('login')}">Back to Login</a></p>
+            <p><a href="{login_url}">Back to Login</a></p>
         </form>
         """
     },
@@ -168,14 +166,14 @@ HTML_TEMPLATES = {
         <hr>
         <h3>Overview</h3>
         <p>Total active expenses in your group: <strong>{expense_count}</strong></p>
-        <p><a href="{url_for('expenses')}">View All Expenses</a> | <a href="{url_for('create_expense')}">Record New Expense</a></p>
+        <p><a href="{expenses_url}">View All Expenses</a> | <a href="{create_expense_url}">Record New Expense</a></p>
         """
     },
     'expenses.html': {
         'title': 'Expense List',
         'content': """
         <h2>Group Expenses</h2>
-        <p><a href="{url_for('create_expense')}">Record New Expense</a></p>
+        <p><a href="{create_expense_url}">Record New Expense</a></p>
         <div class="expense-list">
             <table>
                 <thead>
@@ -226,7 +224,7 @@ HTML_TEMPLATES = {
                 </select>
             </div>
             <button type="submit">Save Expense</button>
-            <p><a href="{url_for('expenses')}">Back to Expenses</a></p>
+            <p><a href="{expenses_url}">Back to Expenses</a></p>
         </form>
         """
     },
@@ -260,9 +258,9 @@ HTML_TEMPLATES = {
                 </select>
             </div>
             <button type="submit">Update Expense</button>
-            <p><a href="{url_for('expenses')}">Back to Expenses</a></p>
+            <p><a href="{expenses_url}">Back to Expenses</a></p>
         </form>
-        <form method="POST" action="{url_for('delete_expense', expense_id=expense_id)}" style="margin-top: 10px;">
+        <form method="POST" action="{delete_expense_url}" style="margin-top: 10px;">
             <button type="submit" style="background-color: #dc3545;">Delete Expense (Soft)</button>
         </form>
         """
@@ -272,7 +270,7 @@ HTML_TEMPLATES = {
 def render_template(template_name, **context):
     """
     Custom function to simulate Flask's render_template using embedded HTML strings.
-    This allows the entire application to exist in one Python file.
+    FIXED: Passes pre-calculated URLs to the template context to resolve KeyError.
     """
     if template_name not in HTML_TEMPLATES:
         return f"<h1>Template '{template_name}' not found</h1>"
@@ -281,18 +279,14 @@ def render_template(template_name, **context):
     title = template_data['title']
     content = template_data['content']
     
-    # --- 1. Navigation Links ---
-    if g.user:
-        nav_links = f'<a href="{url_for("home")}">Dashboard</a> | <a href="{url_for("expenses")}">Expenses</a> | <a href="{url_for("logout")}">Logout ({g.user["username"]})</a>'
-    else:
-        nav_links = f'<a href="{url_for("login")}">Login</a> | <a href="{url_for("register")}">Register</a>'
-
-    # --- 2. Flash Messages ---
-    flashes = ""
-    for category, message in get_flashed_messages(with_categories=True):
-        flashes += f'<div class="flash {category}">{message}</div>'
-    
-    # --- 3. Content Rendering & Variable Substitution ---
+    # --- URL CONTEXT INJECTION (THE FIX) ---
+    # Inject all necessary URLs into the context for use in the template strings
+    context['login_url'] = url_for('login')
+    context['register_url'] = url_for('register')
+    context['forgot_password_url'] = url_for('forgot_password')
+    context['home_url'] = url_for('home')
+    context['expenses_url'] = url_for('expenses')
+    context['create_expense_url'] = url_for('create_expense')
     
     # Handle specific dynamic content/loops
     
@@ -303,6 +297,7 @@ def render_template(template_name, **context):
             for exp in context['expenses']:
                 # Decrypt description on retrieval
                 decrypted_desc = encryptor.decrypt(exp['description']) if exp['description'] else 'N/A'
+                edit_url = url_for('edit_expense', expense_id=exp['id'])
 
                 expense_rows += f"""
                 <tr>
@@ -311,7 +306,7 @@ def render_template(template_name, **context):
                     <td>{decrypted_desc}</td>
                     <td>{exp['amount']} {exp['currency']}</td>
                     <td>{exp['converted_amount']:.2f} USD</td>
-                    <td><a href="{url_for('edit_expense', expense_id=exp['id'])}">Edit</a></td>
+                    <td><a href="{edit_url}">Edit</a></td>
                 </tr>
                 """
         else:
@@ -325,27 +320,38 @@ def render_template(template_name, **context):
         
         content = content.replace('{category_options}', category_options)
         content = content.replace('{currency_options}', currency_options)
-        content = content.replace('{today}', datetime.now().strftime('%Y-%m-%d'))
+        context['today'] = datetime.now().strftime('%Y-%m-%d')
 
         if template_name == 'edit_expense.html' and context.get('expense'):
             exp = context['expense']
-            content = content.replace('{expense_id}', str(exp['id']))
-            content = content.replace('{expense_date}', exp['date'].strftime('%Y-%m-%d'))
-            # Encrypted value is passed to the input, decryption handled by the browser if the user wants to see it, 
-            # or the back-end will decrypt/re-encrypt on update (for this stub, we show the encrypted string as the value)
-            content = content.replace('{expense_description}', exp['description'] if exp['description'] else '') 
-            content = content.replace('{expense_amount}', str(exp['amount']))
+            context['expense_id'] = str(exp['id'])
+            context['expense_date'] = exp['date'].strftime('%Y-%m-%d')
+            context['expense_description'] = encryptor.decrypt(exp['description']) if exp['description'] else '' # Decrypt for display/edit
+            context['expense_amount'] = str(exp['amount'])
+            context['delete_expense_url'] = url_for('delete_expense', expense_id=exp['id']) # Specific URL needed here
     
     # c. home.html data
     if template_name == 'home.html':
-        content = content.replace('{username}', g.user['username'] if g.user else 'Guest')
-        content = content.replace('{role}', g.user_role)
-        content = content.replace('{group_id}', str(g.group_id) if g.group_id else 'None')
-        content = content.replace('{expense_count}', str(context.get('expense_count', 0)))
+        context['username'] = g.user['username'] if g.user else 'Guest'
+        context['role'] = g.user_role
+        context['group_id'] = str(g.group_id) if g.group_id else 'None'
 
 
-    # Basic context substitution (non-loop variables)
-    final_content = content.format(**context)
+    # --- 1. Navigation Links ---
+    if g.user:
+        nav_links = f'<a href="{context["home_url"]}">Dashboard</a> | <a href="{context["expenses_url"]}">Expenses</a> | <a href="{url_for("logout")}">Logout ({context["username"]})</a>'
+    else:
+        nav_links = f'<a href="{context["login_url"]}">Login</a> | <a href="{context["register_url"]}">Register</a>'
+
+    # --- 2. Flash Messages ---
+    flashes = ""
+    for category, message in get_flashed_messages(with_categories=True):
+        flashes += f'<div class="flash {category}">{message}</div>'
+    
+    # --- 3. Final Content Rendering & Variable Substitution ---
+    # Ensure all context variables are strings before format()
+    context_str = {k: str(v) for k, v in context.items()}
+    final_content = content.format(**context_str)
 
     # Final BASE_HTML injection
     return BASE_HTML.format(
@@ -424,6 +430,9 @@ def get_db_connection():
     """Establishes and returns a PostgreSQL database connection."""
     if not DATABASE_URL:
         print("FATAL: DATABASE_URL environment variable is not set.", file=sys.stderr)
+        # Note: In a live environment, this should raise a config error, 
+        # but here we'll simulate a failure that the caller can catch.
+        flash("Database configuration is missing. Cannot connect.", 'error')
         raise ValueError("Database configuration missing.")
 
     try:
@@ -436,11 +445,6 @@ def get_db_connection():
 
 
 # --- AUTHENTICATION & GROUP UTILITIES ---
-
-def get_user_role(user_id):
-    """Fetches user role from DB (stub implementation)."""
-    # This function is never fully used in the mock environment, but kept for completeness
-    return 'user'
 
 def get_group_filter_clause(role, group_id, table_name):
     """Constructs the WHERE clause for group access based on user role."""
@@ -463,6 +467,7 @@ def login_required(view):
 
 def check_user_access():
     """Checks if the user has a group_id or is an admin."""
+    # This check is only needed for features beyond the dashboard/login
     if g.user_role != 'admin' and g.group_id is None:
         flash('Access Denied: You must be assigned to a family group to use the financial tracker features.', 'error')
         return redirect(url_for('home'))
@@ -517,10 +522,7 @@ def load_logged_in_user():
             g.user_role = 'guest'
             g.group_id = None
         finally:
-            if conn: 
-                # Check if cursor is closed before attempting to close the connection
-                # if 'cur' in locals() and cur: cur.close() 
-                conn.close()
+            if conn: conn.close()
 
 
 # --- STUB EMAIL FUNCTION (For Password Reset) ---
@@ -550,8 +552,6 @@ def login():
             cur.execute('SELECT id, password FROM users WHERE username = %s;', (username,))
             user = cur.fetchone()
             
-            # NOTE: bcrypt.check_password_hash is a stub function here as the actual hashing is not executed 
-            # without a full setup, but the logic remains.
             if user and bcrypt.check_password_hash(user['password'], password):
                 session['user_id'] = user['id']
                 flash('Login successful!', 'success')
@@ -581,8 +581,10 @@ def register():
             cur.execute('SELECT id FROM users WHERE username = %s;', (username,))
             if cur.fetchone():
                 flash('Username already exists. Please choose a different one.', 'error')
+                # Need to use the render_template path again if registration fails
                 return render_template('register.html')
             
+            # Note: New users are created with role 'user' and a NULL group_id
             cur.execute(
                 'INSERT INTO users (username, password, role) VALUES (%s, %s, %s);',
                 (username, hashed_password, 'user')
@@ -694,6 +696,8 @@ def home():
     except Exception as e:
         flash(f"Error loading dashboard data: {e}", 'error')
         print(f"Dashboard loading error: {e}", file=sys.stderr)
+        # Set count to 0 if DB connection fails
+        expense_count = 0
     finally:
         if conn: conn.close()
 
@@ -713,11 +717,13 @@ def expenses():
         group_filter, group_params = get_group_filter_clause(g.user_role, g.group_id, 'expenses')
         
         cur.execute(
-            f"SELECT * FROM expenses WHERE activate = TRUE {group_filter};", group_params
+            f"SELECT * FROM expenses WHERE activate = TRUE {group_filter} ORDER BY date DESC;", group_params
         )
         expenses_list = cur.fetchall()
         
-        expenses_list.sort(key=lambda x: x['date'], reverse=True)
+        # NOTE: Sorting by date is handled in the SQL query (ORDER BY) for efficiency, 
+        # but the original Python sort is left commented out as a fallback.
+        # expenses_list.sort(key=lambda x: x['date'], reverse=True)
 
     except Exception as e:
         flash(f"Error loading expenses: {e}", 'error')
@@ -744,7 +750,8 @@ def create_expense():
         date = request.form['date']
         category = request.form['category']
         # Encrypt the description before storing
-        description = encryptor.encrypt(request.form['description'])
+        description_text = request.form['description']
+        description = encryptor.encrypt(description_text)
         amount = request.form['amount']
         currency = request.form['currency'].upper()
         
@@ -830,7 +837,8 @@ def edit_expense(expense_id):
             date = request.form['date']
             category = request.form['category']
             # Re-encrypt the potentially modified description
-            description = encryptor.encrypt(request.form['description'])
+            description_text = request.form['description']
+            description = encryptor.encrypt(description_text)
             amount = request.form['amount']
             currency = request.form['currency'].upper()
 
@@ -844,6 +852,7 @@ def edit_expense(expense_id):
                     converted_amount = float(amount) * conversion_rate
                 except ValueError:
                     flash("Invalid amount entered.", 'error')
+                    # Pass lists and expense data back if validation fails
                     return render_template('edit_expense.html', expense=expense, **lists)
 
             
@@ -873,7 +882,11 @@ def edit_expense(expense_id):
         finally:
             if conn: conn.close()
     
-    return render_template('edit_expense.html', expense=expense, **lists)
+    # Decrypt description for GET display only
+    display_expense = expense.copy()
+    display_expense['description'] = encryptor.decrypt(display_expense['description'])
+    
+    return render_template('edit_expense.html', expense=display_expense, **lists)
 
 
 @app.route('/delete_expense/<int:expense_id>', methods=['POST'])
@@ -907,6 +920,7 @@ def delete_expense(expense_id):
         if conn: conn.close()
 
 # The database setup is crucial for first-time use in a real environment
+# This route is usually for initial admin setup and is protected by @check_admin_required
 @app.route('/setup_db')
 @check_admin_required
 def setup_db():
@@ -916,10 +930,8 @@ def setup_db():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # In a real app, this would execute CREATE TABLE statements for:
-        # 1. users (id, username, password, role, group_id, reset_token, token_expiration)
-        # 2. groups (id, name)
-        # 3. expenses (id, user_id, group_id, date, category, description (encrypted), amount, currency, converted_amount, conversion_rate, activate)
+        # This is a stub for the full setup script. 
+        # In a real environment, this would execute DDL to create users, expenses, and groups tables.
         
         flash("Database setup sequence initiated. (Assuming tables created successfully).", 'success')
         return redirect(url_for('home'))

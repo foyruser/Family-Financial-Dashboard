@@ -1,85 +1,28 @@
 {% extends "base.html" %}
 {% block title %}Group Management{% endblock %}
+{% block header_title %}<h1 class="text-2xl font-bold mb-1">Group Management</h1>{% endblock %}
+{% block header_subtitle %}<p class="text-gray-500">Create a new group or join an existing one.</p>{% endblock %}
 
 {% block content %}
-<div class="min-h-[60vh] p-4 sm:p-8">
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      <div class="mb-6 space-y-2 max-w-4xl mx-auto">
-        {% for category, message in messages %}
-          <div class="p-3 text-sm rounded-lg border
-               {% if category == 'success' %}bg-green-100 text-green-700 border-green-300
-               {% elif category == 'error' %}bg-red-100 text-red-700 border-red-300
-               {% elif category == 'warning' %}bg-amber-100 text-amber-700 border-amber-300
-               {% else %}bg-gray-100 text-gray-700 border-gray-300{% endif %}">{{ message }}</div>
-        {% endfor %}
-      </div>
-    {% endif %}
-  {% endwith %}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+  <div class="bg-white p-6 rounded-xl shadow">
+    <h2 class="text-lg font-semibold mb-3">Your Current Group</h2>
+    <p class="text-gray-700">Group ID: <strong>{{ group_id or 'None' }}</strong></p>
+    <p class="text-sm text-gray-500 mt-1">Username: {{ username }}</p>
 
-  <div class="max-w-4xl mx-auto">
-    <header class="mb-8 flex justify-between items-center">
-      <h1 class="text-3xl font-bold text-gray-800">Family Group Management</h1>
-      <a href="{{ url_for('home') }}" class="text-sm text-blue-600 hover:text-blue-800 font-medium">← Back to Dashboard</a>
-    </header>
+    <form method="POST" action="{{ url_for('create_group') }}" class="mt-4">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+      <button class="px-5 py-3 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">Create New Group</button>
+    </form>
+  </div>
 
-    <div class="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
-      <h2 class="text-xl font-semibold mb-3 text-gray-700">Your Current Status</h2>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="p-4 bg-blue-50 rounded-lg">
-          <p class="text-sm font-medium text-blue-600">Username</p>
-          <p class="text-lg font-bold text-gray-800">{{ username }}</p>
-        </div>
-        <div class="p-4 rounded-lg {% if is_default_group %}bg-red-50{% else %}bg-green-50{% endif %}">
-          <p class="text-sm font-medium {% if is_default_group %}text-red-600{% else %}text-green-600{% endif %}">Current Group ID</p>
-          <p class="text-lg font-bold text-gray-800 break-words">{{ group_id }}</p>
-          {% if is_default_group %}
-            <p class="text-xs text-red-500 mt-1 font-medium">You are in the temporary default group. Create or join a group to start tracking assets.</p>
-          {% else %}
-            <p class="text-xs text-green-500 mt-1 font-medium">Share this ID with family members to invite them.</p>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-
-    {% if is_default_group %}
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-      <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
-        <h3 class="text-xl font-semibold mb-4 text-gray-700 flex items-center">
-          <svg class="w-6 h-6 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-          Create a New Family Group
-        </h3>
-        <p class="text-gray-600 mb-4 text-sm">A unique ID will be generated for you to share.</p>
-        <form action="{{ url_for('create_group') }}" method="POST">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 px-4 rounded-lg">
-            Create New Group
-          </button>
-        </form>
-      </div>
-
-      <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
-        <h3 class="text-xl font-semibold mb-4 text-gray-700 flex items-center">
-          <svg class="w-6 h-6 mr-2 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-          Join an Existing Group
-        </h3>
-        <p class="text-gray-600 mb-4 text-sm">Enter the Group ID shared by a family member.</p>
-        <form action="{{ url_for('join_group') }}" method="POST">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <input type="text" id="target_group_id" name="target_group_id" required
-                 placeholder="Enter Group ID (e.g., family-ab01c2)"
-                 class="w-full p-2.5 mb-4 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500">
-          <button type="submit" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2.5 px-4 rounded-lg">
-            Join Group
-          </button>
-        </form>
-      </div>
-    </div>
-    {% endif %}
-
-    <footer class="mt-8 text-center text-xs text-gray-500">
-      Securely managed by {{ username }} • Group: {{ group_id or 'N/A' }}
-    </footer>
+  <div class="bg-white p-6 rounded-xl shadow">
+    <h2 class="text-lg font-semibold mb-3">Join an Existing Group</h2>
+    <form method="POST" action="{{ url_for('join_group') }}" class="space-y-3">
+      {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+      <input type="text" name="target_group_id" placeholder="Enter Group ID" class="w-full px-4 py-2 border rounded-lg" required>
+      <button class="px-5 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700">Join Group</button>
+    </form>
   </div>
 </div>
 {% endblock %}

@@ -776,23 +776,47 @@ def expenses():
 @auth_required
 def add_expense():
     lists = get_common_lists()
+
     if request.method == "POST":
-        description = request.form.get("description")
-        amount = request.form.get("amount")
-        currency = request.form.get("currency")
-        category = request.form.get("category")
-        expense_date = request.form.get("expense_date")
+        # from your form
+        description  = request.form.get("description") or ""
+        amount       = request.form.get("amount") or 0
+        currency     = request.form.get("currency") or "USD"
+        category     = request.form.get("category") or "Misc"
+        expense_date = request.form.get("expense_date")  # yyyy-mm-dd
+        notes        = request.form.get("notes") or None
+
+        # safety: ensure we actually have a logged-in user id
+        if not g.user_id:
+            flash("Please log in again.", "error")
+            return redirect(url_for("login"))
+
         conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
+
+            # ► If your column is named `expense_date` (common in your templates):
             cur.execute("""
-                INSERT INTO expenses (group_id, description, amount, currency, category, date_incurred, created_by, activate)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE);
-            """, (g.group_id, enc(description), amount, currency, category, expense_date, g.user_id))
+                INSERT INTO expenses (
+                    user_id, group_id, description, amount, currency, category, expense_date, notes, activate
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE);
+            """, (
+                g.user_id,               # <-- FIX: set user_id
+                g.group_id,
+                enc(description),        # keep sensitive text encrypted if you want
+                amount,
+                currency,
+                category,
+                expense_date,            # or map to date_incurred if your column is named that
+                enc(notes) if notes else None
+            ))
+
             conn.commit()
             flash("Expense successfully added.", "success")
             return redirect(url_for("expenses"))
+
         except Exception as e:
             print(f"add_expense error: {e}", file=sys.stderr)
             flash(f"Error adding expense: {e}", "error")
@@ -801,7 +825,12 @@ def add_expense():
                 try: cur.close()
                 except: pass
                 conn.close()
-    return render_template("add_expense.html", categories=lists["expense_categories"], currencies=lists["currencies"])
+
+    return render_template(
+        "add_expense.html",
+        categories=lists["expense_categories"],
+        currencies=lists["currencies"]
+    )
 
 @app.route("/edit_expense/<int:expense_id>", methods=["GET", "POST"])
 @auth_required
@@ -1307,5 +1336,6 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 

@@ -465,6 +465,28 @@ def send_email(to_email, subject, html_body):
         print(f"Email send failed: {e}", file=sys.stderr)
         return False
 
+def notify_user_approved(username: str, email: str | None, group_id: str | None):
+    """
+    Send a confirmation email to the user when an admin approves their account.
+    """
+    to_addr = (email or username or "").strip()
+    if not to_addr:
+        # Nothing to send to
+        return False
+
+    subject = "[Family Finance] Your account has been approved"
+    html = f"""
+        <h2>Welcome!</h2>
+        <p>Hi <strong>{username}</strong>,</p>
+        <p>Your account has been <strong>approved</strong> and activated.</p>
+        <p>{'You were assigned to group: <strong>' + group_id + '</strong>.' if group_id else ''}</p>
+        <p>You can now sign in here:</p>
+        <p><a href="{request.url_root.rstrip('/')}">{request.url_root.rstrip('/')}</a></p>
+        <hr>
+        <p>This is an automated message. If you didn’t request this, please ignore.</p>
+    """
+    return send_email(to_addr, subject, html)
+
 @limiter.limit("5 per hour")
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
@@ -663,16 +685,46 @@ def admin_approve_users():
         if request.method == "POST":
             user_id = request.form.get("user_id")
             group_id = request.form.get("group_id")
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET activate=TRUE, group_id=%s WHERE id=%s;", (group_id, user_id))
+
+            # Approve & assign group
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("""
+                UPDATE users
+                   SET activate = TRUE,
+                       group_id = %s
+                 WHERE id = %s
+             RETURNING id, username, email, group_id;
+            """, (group_id, user_id))
+            updated = cur.fetchone()
             conn.commit()
-            flash("User approved and group assigned.", "success")
+
+            if not updated:
+                flash("User not found.", "error")
+                return redirect(url_for("admin_approve_users"))
+
+            # 🔔 Email the user (best-effort; don't block the admin flow)
+            try:
+                sent = notify_user_approved(
+                    username=updated.get("username"),
+                    email=updated.get("email"),
+                    group_id=updated.get("group_id"),
+                )
+                if sent:
+                    flash(f"User approved and email sent to {updated.get('email') or updated.get('username')}.", "success")
+                else:
+                    flash("User approved. Email not sent (no email on file or SMTP not configured).", "warning")
+            except Exception as e:
+                print(f"notify_user_approved error: {e}", file=sys.stderr)
+                flash("User approved, but failed to send notification email.", "warning")
+
             return redirect(url_for("admin_approve_users"))
 
+        # GET: list pending users
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT id, username FROM users WHERE activate=FALSE;")
+        cur.execute("SELECT id, username FROM users WHERE activate = FALSE ORDER BY id ASC;")
         pending = cur.fetchall()
         return render_template("admin_approve_users.html", pending_users=pending)
+
     except Exception as e:
         print(f"admin_approve_users error: {e}", file=sys.stderr)
         flash("Admin action failed.", "error")
@@ -1125,6 +1177,23 @@ def notify_admin_new_user(username: str, email: str | None):
         except Exception as e:
             print(f"admin notify failed to {admin_addr}: {e}", file=sys.stderr)
 
+def notify_admin_user_approved(username: str, approver: str | None, group_id: str | None):
+    if not ADMIN_NOTIFY_EMAILS:
+        return
+    subject = f"[Family Finance] User approved: {username}"
+    html = f"""
+        <h2>User Approved</h2>
+        <p><strong>User:</strong> {username}</p>
+        <p><strong>Group:</strong> {group_id or '(none)'}</p>
+        <p><strong>Approved by:</strong> {approver or 'Admin'}</p>
+        <p><strong>When (UTC):</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%SZ')}</p>
+    """
+    for admin_addr in ADMIN_NOTIFY_EMAILS:
+        try:
+            send_email(admin_addr, subject, html)
+        except Exception as e:
+            print(f"notify_admin_user_approved failed to {admin_addr}: {e}", file=sys.stderr)
+
 # -------------------------------------------------
 # Dev helper: init_db (optional, dangerous in prod)
 # -------------------------------------------------
@@ -1238,4 +1307,5 @@ def init_db():
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 

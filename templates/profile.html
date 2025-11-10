@@ -1,38 +1,30 @@
 {% extends "base.html" %}
-
-{% block title %}User Profile{% endblock %}
-{% block header_title %}My Profile Settings{% endblock %}
-{% block header_subtitle %}View and manage your account information.{% endblock %}
+{% block title %}Profile{% endblock %}
+{% block header_title %}<h1 class="text-2xl font-bold mb-1">Profile</h1>{% endblock %}
+{% block header_subtitle %}<p class="text-gray-500">Your account details.</p>{% endblock %}
 
 {% block content %}
-<div class="bg-white p-6 sm:p-10 rounded-xl shadow-2xl max-w-lg mx-auto">
-    <h2 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-2">Account Details</h2>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+  <div class="bg-white rounded-xl shadow p-6">
+    <h2 class="text-lg font-semibold mb-4">Account</h2>
+    <dl class="text-sm">
+      <div class="flex justify-between py-2 border-b">
+        <dt class="text-gray-500">Username</dt><dd class="font-medium">{{ user.username }}</dd>
+      </div>
+      <div class="flex justify-between py-2 border-b">
+        <dt class="text-gray-500">Email</dt><dd class="font-medium">{{ user.email or user.username }}</dd>
+      </div>
+      <div class="flex justify-between py-2">
+        <dt class="text-gray-500">Group</dt><dd class="font-medium">{{ user.group_id or '—' }}</dd>
+      </div>
+    </dl>
+  </div>
 
-    <div class="space-y-6">
-        
-        <div class="border-b border-gray-100 pb-4">
-            <p class="text-sm font-medium text-gray-500">Username</p>
-            <p class="text-lg font-semibold text-gray-900 mt-1">{{ user.username }}</p>
-        </div>
-
-        <div class="border-b border-gray-100 pb-4">
-            <p class="text-sm font-medium text-gray-500">Email Address</p>
-            <p class="text-lg font-semibold text-gray-900 mt-1">{{ user.email }}</p>
-        </div>
-
-        <div>
-            <p class="text-sm font-medium text-gray-500">Family Group ID</p>
-            <p class="text-lg font-semibold text-gray-900 mt-1">{{ user.group_id | default('N/A') }}</p>
-        </div>
-    </div>
-
-    <div class="mt-8 pt-6 border-t border-gray-200">
-        <h3 class="text-xl font-semibold text-gray-700 mb-4">Security</h3>
-        <a href="{{ url_for('change_password') }}"
-           class="inline-flex items-center justify-center w-full px-6 py-3 border border-transparent text-base font-medium rounded-lg shadow-sm text-white bg-purple-600 hover:bg-purple-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500">
-           Change Password
-        </a>
-    </div>
-
+  <div class="bg-white rounded-xl shadow p-6">
+    <h2 class="text-lg font-semibold mb-4">Security</h2>
+    <a href="{{ url_for('change_password') }}" class="inline-flex items-center px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+      <i data-lucide="lock" class="w-4 h-4 mr-2"></i>Change Password
+    </a>
+  </div>
 </div>
 {% endblock %}

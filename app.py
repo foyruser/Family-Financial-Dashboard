@@ -25,7 +25,10 @@ from cryptography.fernet import Fernet
 app = Flask(__name__)
 
 # Secret keys (provide via Render env)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY", "a_long_random_fallback_key")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
+
+if not app.secret_key:
+    raise RuntimeError("CRITICAL: FLASK_SECRET_KEY is not set in the environment")
 
 # Secure cookies in prod
 app.config.update(
@@ -1230,6 +1233,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

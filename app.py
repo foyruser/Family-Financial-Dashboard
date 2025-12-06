@@ -911,7 +911,7 @@ def delete_expense(expense_id):
 # -------------------------------------------------
 # Assets
 # -------------------------------------------------
-SENSITIVE_ASSET_FIELDS = ["account_no", "beneficiary_name", "contact_phone", "document_location", "description"]
+SENSITIVE_ASSET_FIELDS = ["account_no", "beneficiary_name", "contact_phone", "document_location", "description", "financial_institution"]
 
 @app.route("/assets")
 @auth_required
@@ -1229,6 +1229,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

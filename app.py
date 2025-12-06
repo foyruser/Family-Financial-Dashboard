@@ -911,30 +911,7 @@ def delete_expense(expense_id):
 # -------------------------------------------------
 # Assets
 # -------------------------------------------------
-SENSITIVE_ASSET_FIELDS = ["account_no", "beneficiary_name", "contact_phone", "document_location", "description"]
-
-@app.route("/assets")
-@auth_required
-def assets():
-    conn = None
-    rows = []
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
-        cur.execute(f"""
-            SELECT a.id, a.user_id, a.type, a.name, a.country, a.currency, a.value, a.account_no,
-                   a.last_updated, a.notes, a.activate, a.owner, a.owner_id, a.financial_institution,
-                   a.beneficiary_name, a.policy_or_plan_type, a.contact_phone, a.document_location,
-                   a.investment_strategy, a.current_value, a.description, a.added_date, a.group_id
-            FROM assets a
-            WHERE a.activate=TRUE {gf}
-            ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC;
-        """, gp)
-        rows = cur.fetchall()
-
-        # Decrypt and format dates
-       # Decrypt and format dates
+# -------- Encrypted fields --------
 ENCRYPTED_FIELDS = [
     "account_no",
     "beneficiary_name",
@@ -946,16 +923,82 @@ ENCRYPTED_FIELDS = [
     "name"
 ]
 
-for r in rows:
-    for f in ENCRYPTED_FIELDS:
-        r[f] = dec(r.get(f))
-    if r.get("last_updated"):
-        r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
-    if r.get("added_date"):
-        r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
+# -------- List assets --------
+@app.route("/assets")
+@auth_required
+def assets():
+    conn = None
+    rows = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
+        
+        cur.execute(f"""
+            SELECT a.id, a.user_id, a.type, a.name, a.country, a.currency, a.value, a.account_no,
+                   a.last_updated, a.notes, a.activate, a.owner, a.owner_id, a.financial_institution,
+                   a.beneficiary_name, a.policy_or_plan_type, a.contact_phone, a.document_location,
+                   a.investment_strategy, a.current_value, a.description, a.added_date, a.group_id
+            FROM assets a
+            WHERE a.activate=TRUE {gf}
+            ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC;
+        """, gp)
+        rows = cur.fetchall()
+
+        # Decrypt fields and format dates
+        for r in rows:
+            for f in ENCRYPTED_FIELDS:
+                if r.get(f) is not None:
+                    r[f] = dec(r[f])
+            if r.get("last_updated"):
+                r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
+            if r.get("added_date"):
+                r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
+
+        # -------- USD equivalent --------
+        inr_to_usd = 1.0 / 83.0  # fallback
+        try:
+            if EXCHANGE_RATE_API_KEY:
+                usd_to_inr = get_exchange_rate("USD", "INR")
+                inr_to_usd = 1.0 / float(usd_to_inr) if usd_to_inr else inr_to_usd
+            else:
+                res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
+                data = res.json()
+                inr_to_usd = 1.0 / float(data["rates"]["INR"])
+        except Exception as e:
+            print("FX fetch failed; using fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
+
+        for r in rows:
+            curr = (r.get("currency") or "").upper()
+            try:
+                val = float(r.get("current_value") or r.get("value") or 0.0)
+            except Exception:
+                val = 0.0
+            r["usd_value"] = round(val, 2) if curr == "USD" else round(val * inr_to_usd, 2) if curr == "INR" else None
+
+        # -------- Sorting --------
+        sortable_fields = {"name", "type", "country", "currency", "last_updated", "usd_value", "current_value", "added_date"}
+        sort_by = request.args.get("sort", "usd_value")
+        order = request.args.get("order", "desc").lower()
+        if sort_by not in sortable_fields:
+            sort_by = "usd_value"
+        if order not in ("asc", "desc"):
+            order = "desc"
+        reverse = (order == "desc")
+
+        def sort_key(r):
+            v = r.get(sort_by)
+            if sort_by in ("usd_value", "current_value"):
+                try: return float(v or 0.0)
+                except: return 0.0
+            if sort_by in ("last_updated", "added_date"):
+                return v or ""
+            return (str(v or "")).lower()
+
+        rows = sorted(rows, key=sort_key, reverse=reverse)
 
     except Exception as e:
-        print(f"assets load error: {e}", file=sys.stderr)
+        print(f"Assets load error: {e}", file=sys.stderr)
         flash(f"Error loading assets: {e}", "error")
     finally:
         if conn:
@@ -963,85 +1006,15 @@ for r in rows:
             except: pass
             conn.close()
 
-    # -------- USD equivalent (API with INR fallback to 83) --------
-    inr_to_usd = None
-    try:
-        # Prefer your configured API key if present
-        if EXCHANGE_RATE_API_KEY:
-            usd_to_inr = get_exchange_rate("USD", "INR")  # this already uses API if available
-            inr_to_usd = 1.0 / float(usd_to_inr) if usd_to_inr else 1.0 / 83.0
-        else:
-            res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
-            data = res.json()
-            usd_to_inr = data["rates"]["INR"]  # 1 USD = X INR
-            inr_to_usd = 1.0 / float(usd_to_inr)
-    except Exception as e:
-        print("FX fetch failed; using fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
-        inr_to_usd = 1.0 / 83.0
-
-    for r in rows:
-        curr = (r.get("currency") or "").upper()
-        try:
-            val = float(r.get("current_value") or r.get("value") or 0.0)
-        except Exception:
-            val = 0.0
-
-        if curr == "USD":
-            r["usd_value"] = round(val, 2)
-        elif curr == "INR":
-            r["usd_value"] = round(val * inr_to_usd, 2)
-        else:
-            r["usd_value"] = None
-
-    # -------- Sorting --------
-    # ?sort=<field>&order=asc|desc
-    sortable_fields = {
-        "name", "type", "country", "currency", "last_updated",
-        "usd_value", "current_value", "added_date"
-    }
-    sort_by = request.args.get("sort", "usd_value")
-    order = request.args.get("order", "desc").lower()
-    if sort_by not in sortable_fields:
-        sort_by = "usd_value"
-    if order not in ("asc", "desc"):
-        order = "desc"
-
-    reverse = (order == "desc")
-
-    def sort_key(r):
-        v = r.get(sort_by)
-        if sort_by in ("usd_value", "current_value"):
-            try:
-                return float(v or 0.0)
-            except Exception:
-                return 0.0
-        if sort_by in ("last_updated", "added_date"):
-            return v or ""
-        return (str(v or "")).lower()
-
-    rows = sorted(rows, key=sort_key, reverse=reverse)
-
     return render_template("assets.html", assets=rows, sort_by=sort_by, order=order)
 
+# -------- Add asset --------
 @app.route("/add_asset", methods=["GET", "POST"])
 @auth_required
 def add_asset():
     lists = get_common_lists()
     if request.method == "POST":
-        owner_id = request.form.get("owner_id")
-        atype = request.form.get("type")
-        name = request.form.get("name")
-        account_no = request.form.get("account_no")
-        value = request.form.get("value")
-        currency = request.form.get("currency")
-        country = request.form.get("country")
-        financial_institution = request.form.get("financial_institution")
-        policy_or_plan_type = request.form.get("policy_or_plan_type")
-        beneficiary_name = request.form.get("beneficiary_name")
-        contact_phone = request.form.get("contact_phone")
-        document_location = request.form.get("document_location")
-        investment_strategy = request.form.get("investment_strategy")
-        notes = request.form.get("notes")
+        form = request.form
         now = datetime.now()
         added_date = now.date()
         last_updated = now
@@ -1057,12 +1030,13 @@ def add_asset():
                      document_location, investment_strategy, current_value, description, added_date, group_id)
                 VALUES
                     (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
-                     %s, %s, %s, %s, %s, %s,
-                     %s, %s, %s, %s, %s, %s);
+                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
-                g.user_id, atype, name, country, currency, value, enc(account_no), last_updated, notes,
-                None, owner_id, enc(financial_institution), enc(beneficiary_name), policy_or_plan_type, enc(contact_phone),
-                enc(document_location), investment_strategy, value, enc(""), added_date, g.group_id
+                g.user_id, form.get("type"), form.get("name"), form.get("country"), form.get("currency"), form.get("value"),
+                enc(form.get("account_no")), last_updated, enc(form.get("notes")), None, form.get("owner_id"),
+                enc(form.get("financial_institution")), enc(form.get("beneficiary_name")), form.get("policy_or_plan_type"),
+                enc(form.get("contact_phone")), enc(form.get("document_location")), form.get("investment_strategy"),
+                form.get("value"), enc(""), added_date, g.group_id
             ))
             conn.commit()
             flash("Asset saved.", "success")
@@ -1084,6 +1058,7 @@ def add_asset():
         countries=lists["countries"],
     )
 
+# -------- Edit asset --------
 @app.route("/edit_asset/<int:asset_id>", methods=["GET", "POST"])
 @auth_required
 def edit_asset(asset_id):
@@ -1093,33 +1068,15 @@ def edit_asset(asset_id):
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
-        cur.execute(f"""
-            SELECT a.*
-            FROM assets a
-            WHERE a.id=%s AND a.activate=TRUE {gf};
-        """, (asset_id,) + gp)
+        cur.execute(f"SELECT a.* FROM assets a WHERE a.id=%s AND a.activate=TRUE {gf};", (asset_id,) + gp)
         asset = cur.fetchone()
         if not asset:
             flash("Asset not found or unauthorized.", "error")
             return redirect(url_for("assets"))
 
         if request.method == "POST":
-            owner_id = request.form.get("owner_id")
-            atype = request.form.get("type")
-            name = request.form.get("name")
-            account_no = request.form.get("account_no")
-            value = request.form.get("value")
-            currency = request.form.get("currency")
-            country = request.form.get("country")
-            financial_institution = request.form.get("financial_institution")
-            policy_or_plan_type = request.form.get("policy_or_plan_type")
-            beneficiary_name = request.form.get("beneficiary_name")
-            contact_phone = request.form.get("contact_phone")
-            document_location = request.form.get("document_location")
-            investment_strategy = request.form.get("investment_strategy")
-            notes = request.form.get("notes")
+            form = request.form
             last_updated = datetime.now()
-
             cur2 = conn.cursor()
             cur2.execute(f"""
                 UPDATE assets
@@ -1128,9 +1085,11 @@ def edit_asset(asset_id):
                     document_location=%s, investment_strategy=%s, notes=%s, last_updated=%s
                 WHERE id=%s AND activate=TRUE {gf};
             """, (
-                owner_id, atype, name, enc(account_no), value, currency, country,
-                enc(financial_institution), policy_or_plan_type, enc(beneficiary_name), enc(contact_phone),
-                enc(document_location), investment_strategy, notes, last_updated, asset_id
+                form.get("owner_id"), form.get("type"), form.get("name"), enc(form.get("account_no")), form.get("value"),
+                form.get("currency"), form.get("country"), enc(form.get("financial_institution")),
+                form.get("policy_or_plan_type"), enc(form.get("beneficiary_name")), enc(form.get("contact_phone")),
+                enc(form.get("document_location")), form.get("investment_strategy"), enc(form.get("notes")),
+                last_updated, asset_id
             ) + gp)
             if cur2.rowcount == 0:
                 flash("Update failed: not found or unauthorized.", "error")
@@ -1140,8 +1099,14 @@ def edit_asset(asset_id):
                 return redirect(url_for("assets"))
 
         # decrypt for form display
-        for f in SENSITIVE_ASSET_FIELDS:
-            asset[f] = dec(asset.get(f))
+        for f in ENCRYPTED_FIELDS:
+            if asset.get(f) is not None:
+                asset[f] = dec(asset[f])
+        if asset.get("last_updated"):
+            asset["last_updated"] = asset["last_updated"].strftime("%Y-%m-%d")
+        if asset.get("added_date"):
+            asset["added_date"] = asset["added_date"].strftime("%Y-%m-%d")
+
         return render_template(
             "edit_asset.html",
             asset=asset,
@@ -1150,6 +1115,7 @@ def edit_asset(asset_id):
             currencies=lists["currencies"],
             countries=lists["countries"],
         )
+
     except Exception as e:
         print(f"edit_asset error: {e}", file=sys.stderr)
         flash("Failed to load asset.", "error")
@@ -1159,6 +1125,7 @@ def edit_asset(asset_id):
             try: cur.close()
             except: pass
             conn.close()
+
 
 @app.route("/delete_asset/<int:asset_id>", methods=["POST"])
 @auth_required
@@ -1239,6 +1206,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

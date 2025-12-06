@@ -924,9 +924,14 @@ ENCRYPTED_FIELDS = [
 ]
 
 def safe_dec(val):
-    """Decrypt safely; return original if fails."""
+    """Safely decrypt a value; return original if fails."""
     try:
-        return dec(val) if val else None
+        if val is None:
+            return None
+        # If bytes from DB, decode to str
+        if isinstance(val, bytes):
+            val = val.decode('utf-8')
+        return dec(val)
     except Exception as e:
         print(f"Decrypt error for value {val}: {e}", file=sys.stderr)
         return val
@@ -955,15 +960,14 @@ def assets():
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
-
         cur.execute(f"SELECT a.* FROM assets a WHERE a.activate=TRUE {gf};", gp)
         rows = cur.fetchall()
 
-        # Decrypt and format
+        # Decrypt all encrypted fields
         rows = [decrypt_asset(r) for r in rows]
 
         # USD conversion
-        inr_to_usd = 1.0 / 83.0
+        inr_to_usd = 1.0 / 83.0  # fallback
         try:
             if EXCHANGE_RATE_API_KEY:
                 usd_to_inr = get_exchange_rate("USD", "INR")
@@ -973,7 +977,7 @@ def assets():
                 data = res.json()
                 inr_to_usd = 1.0 / float(data["rates"]["INR"])
         except Exception as e:
-            print("FX fetch failed; fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
+            print("FX fetch failed; using fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
 
         for r in rows:
             curr = (r.get("currency") or "").upper()
@@ -1103,6 +1107,7 @@ def edit_asset(asset_id):
                 flash("Asset updated.", "success")
                 return redirect(url_for("assets"))
 
+        # Decrypt before showing form
         asset = decrypt_asset(asset)
 
         return render_template(
@@ -1147,6 +1152,7 @@ def delete_asset(asset_id):
             try: cur.close()
             except: pass
             conn.close()
+
     return redirect(url_for("assets"))
 # comma-separated list of admin emails to notify
 ADMIN_NOTIFY_EMAILS = [
@@ -1203,6 +1209,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

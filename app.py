@@ -924,12 +924,23 @@ ENCRYPTED_FIELDS = [
 ]
 
 def safe_dec(val):
-    """Safely decrypt a value; return original if fails."""
+    """Decrypt safely; return original if fails."""
     try:
-        return dec(val) if val is not None else None
+        return dec(val) if val else None
     except Exception as e:
         print(f"Decrypt error for value {val}: {e}", file=sys.stderr)
         return val
+
+def decrypt_asset(asset):
+    """Decrypt all encrypted fields and format dates."""
+    for f in ENCRYPTED_FIELDS:
+        if f in asset:
+            asset[f] = safe_dec(asset[f])
+    if asset.get("last_updated"):
+        asset["last_updated"] = asset["last_updated"].strftime("%Y-%m-%d")
+    if asset.get("added_date"):
+        asset["added_date"] = asset["added_date"].strftime("%Y-%m-%d")
+    return asset
 
 # -------- List assets --------
 @app.route("/assets")
@@ -939,31 +950,20 @@ def assets():
     rows = []
     sort_by = request.args.get("sort", "usd_value")
     order = request.args.get("order", "desc").lower()
+
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
 
-        cur.execute(f"""
-            SELECT a.*
-            FROM assets a
-            WHERE a.activate=TRUE {gf}
-            ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC;
-        """, gp)
+        cur.execute(f"SELECT a.* FROM assets a WHERE a.activate=TRUE {gf};", gp)
         rows = cur.fetchall()
 
-        # Decrypt sensitive fields and format dates
-        for r in rows:
-            for f in ENCRYPTED_FIELDS:
-                if f in r:
-                    r[f] = safe_dec(r[f])
-            if r.get("last_updated"):
-                r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
-            if r.get("added_date"):
-                r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
+        # Decrypt and format
+        rows = [decrypt_asset(r) for r in rows]
 
-        # -------- USD equivalent --------
-        inr_to_usd = 1.0 / 83.0  # fallback
+        # USD conversion
+        inr_to_usd = 1.0 / 83.0
         try:
             if EXCHANGE_RATE_API_KEY:
                 usd_to_inr = get_exchange_rate("USD", "INR")
@@ -973,7 +973,7 @@ def assets():
                 data = res.json()
                 inr_to_usd = 1.0 / float(data["rates"]["INR"])
         except Exception as e:
-            print("FX fetch failed; using fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
+            print("FX fetch failed; fallback 1 USD = ₹83. Error:", e, file=sys.stderr)
 
         for r in rows:
             curr = (r.get("currency") or "").upper()
@@ -983,13 +983,13 @@ def assets():
                 val = 0.0
             r["usd_value"] = round(val, 2) if curr == "USD" else round(val * inr_to_usd, 2) if curr == "INR" else None
 
-        # -------- Sorting --------
+        # Sorting
         sortable_fields = {"name", "type", "country", "currency", "last_updated", "usd_value", "current_value", "added_date"}
         if sort_by not in sortable_fields:
             sort_by = "usd_value"
         if order not in ("asc", "desc"):
             order = "desc"
-        reverse = (order == "desc")
+        reverse = order == "desc"
 
         def sort_key(r):
             v = r.get(sort_by)
@@ -1030,18 +1030,18 @@ def add_asset():
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO assets
-                    (user_id, type, name, country, currency, value, account_no, last_updated, notes, activate,
-                     owner, owner_id, financial_institution, beneficiary_name, policy_or_plan_type, contact_phone,
-                     document_location, investment_strategy, current_value, description, added_date, group_id)
+                (user_id, type, name, country, currency, value, account_no, last_updated, notes, activate,
+                 owner, owner_id, financial_institution, beneficiary_name, policy_or_plan_type, contact_phone,
+                 document_location, investment_strategy, current_value, description, added_date, group_id)
                 VALUES
-                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
-                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
+                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
-                g.user_id, form.get("type"), form.get("name"), form.get("country"), form.get("currency"),
+                g.user_id, form.get("type"), enc(form.get("name")), form.get("country"), form.get("currency"),
                 form.get("value"), enc(form.get("account_no")), last_updated, enc(form.get("notes")), None,
                 form.get("owner_id"), enc(form.get("financial_institution")), enc(form.get("beneficiary_name")),
                 form.get("policy_or_plan_type"), enc(form.get("contact_phone")), enc(form.get("document_location")),
-                form.get("investment_strategy"), form.get("value"), enc(""), added_date, g.group_id
+                form.get("investment_strategy"), form.get("value"), enc(form.get("description")), added_date, g.group_id
             ))
             conn.commit()
             flash("Asset saved.", "success")
@@ -1073,7 +1073,7 @@ def edit_asset(asset_id):
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
-        cur.execute("SELECT a.* FROM assets a WHERE a.id=%s AND a.activate=TRUE {gf};".format(gf=gf), (asset_id,) + gp)
+        cur.execute(f"SELECT a.* FROM assets a WHERE a.id=%s AND a.activate=TRUE {gf};", (asset_id,) + gp)
         asset = cur.fetchone()
         if not asset:
             flash("Asset not found or unauthorized.", "error")
@@ -1090,7 +1090,7 @@ def edit_asset(asset_id):
                     document_location=%s, investment_strategy=%s, notes=%s, last_updated=%s
                 WHERE id=%s AND activate=TRUE {gf};
             """, (
-                form.get("owner_id"), form.get("type"), form.get("name"), enc(form.get("account_no")), form.get("value"),
+                form.get("owner_id"), form.get("type"), enc(form.get("name")), enc(form.get("account_no")), form.get("value"),
                 form.get("currency"), form.get("country"), enc(form.get("financial_institution")),
                 form.get("policy_or_plan_type"), enc(form.get("beneficiary_name")), enc(form.get("contact_phone")),
                 enc(form.get("document_location")), form.get("investment_strategy"), enc(form.get("notes")),
@@ -1103,14 +1103,7 @@ def edit_asset(asset_id):
                 flash("Asset updated.", "success")
                 return redirect(url_for("assets"))
 
-        # decrypt for form display
-        for f in ENCRYPTED_FIELDS:
-            if asset.get(f) is not None:
-                asset[f] = safe_dec(asset[f])
-        if asset.get("last_updated"):
-            asset["last_updated"] = asset["last_updated"].strftime("%Y-%m-%d")
-        if asset.get("added_date"):
-            asset["added_date"] = asset["added_date"].strftime("%Y-%m-%d")
+        asset = decrypt_asset(asset)
 
         return render_template(
             "edit_asset.html",
@@ -1155,7 +1148,6 @@ def delete_asset(asset_id):
             except: pass
             conn.close()
     return redirect(url_for("assets"))
-
 # comma-separated list of admin emails to notify
 ADMIN_NOTIFY_EMAILS = [
     e.strip() for e in os.environ.get("ADMIN_NOTIFY_EMAILS", "").split(",")
@@ -1211,6 +1203,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

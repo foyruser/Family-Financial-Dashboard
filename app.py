@@ -777,4 +777,749 @@ def change_password():
             conn = get_db_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT password_
+                    "SELECT password_hash FROM users WHERE id=%s;",
+                    (g.user_id,)
+                )
+                row = cur.fetchone()
+                
+                if not row or not bcrypt.check_password_hash(row["password_hash"], current):
+                    flash("Current password is incorrect.", "error")
+                    return render_template("change_password.html")
+                
+                new_hash = bcrypt.generate_password_hash(new).decode("utf-8")
+                cur.execute(
+                    "UPDATE users SET password_hash=%s WHERE id=%s;",
+                    (new_hash, g.user_id)
+                )
+                conn.commit()
+                
+                audit_log("password_changed", "user", g.user_id)
+                flash("Password updated successfully.", "success")
+                return redirect(url_for("profile"))
+        except Exception as e:
+            print(f"change_password error: {e}", file=sys.stderr)
+            flash("Password change failed. Please try again.", "error")
+        finally:
+            if conn:
+                conn.close()
+    
+    return render_template("change_password.html")
+
+# -------------------------------------------------
+# Group management
+# -------------------------------------------------
+@app.route("/group")
+@auth_required
+def group_management():
+    is_default = g.group_id is None
+    return render_template("group_management.html", username=g.username, 
+                         group_id=g.group_id, is_default_group=is_default)
+
+@limiter.limit("5 per hour")
+@app.route("/create_group", methods=["POST"])
+@auth_required
+def create_group():
+    new_gid = f"family-{secrets.token_urlsafe(8)}"
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET group_id=%s WHERE id=%s;",
+                (new_gid, g.user_id)
+            )
+            conn.commit()
+        
+        audit_log("group_created", "group", details=new_gid)
+        flash(f"New group created: {new_gid}", "success")
+    except Exception as e:
+        print(f"create_group error: {e}", file=sys.stderr)
+        flash("Failed to create group. Please try again.", "error")
+    finally:
+        if conn:
+            conn.close()
+    
+    return redirect(url_for("group_management"))
+
+@limiter.limit("5 per hour")
+@app.route("/join_group", methods=["POST"])
+@auth_required
+def join_group():
+    target_gid = (request.form.get("target_group_id") or "").strip()
+    
+    if not target_gid:
+        flash("Group ID required.", "error")
+        return redirect(url_for("group_management"))
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET group_id=%s WHERE id=%s;",
+                (target_gid, g.user_id)
+            )
+            conn.commit()
+        
+        audit_log("group_joined", "group", details=target_gid)
+        flash(f"Joined group: {target_gid}", "success")
+    except Exception as e:
+        print(f"join_group error: {e}", file=sys.stderr)
+        flash("Failed to join group. Please try again.", "error")
+    finally:
+        if conn:
+            conn.close()
+    
+    return redirect(url_for("group_management"))
+
+# -------------------------------------------------
+# Admin
+# -------------------------------------------------
+@limiter.limit("10 per hour")
+@app.route("/admin/approve_users", methods=["GET", "POST"])
+@auth_required
+@admin_required
+def admin_approve_users():
+    conn = None
+    try:
+        conn = get_db_connection()
+        
+        if request.method == "POST":
+            user_id = request.form.get("user_id")
+            group_id = (request.form.get("group_id") or "").strip() or None
+            
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    UPDATE users
+                       SET activate = TRUE,
+                           group_id = %s
+                     WHERE id = %s
+                 RETURNING id, username, email, group_id;
+                """, (group_id, user_id))
+                updated = cur.fetchone()
+                conn.commit()
+                
+                if not updated:
+                    flash("User not found.", "error")
+                    return redirect(url_for("admin_approve_users"))
+                
+                audit_log("user_approved", "user", user_id, details=f"group: {group_id}")
+                
+                # Email notification (best-effort)
+                try:
+                    sent = notify_user_approved(
+                        username=updated.get("username"),
+                        email=updated.get("email"),
+                        group_id=updated.get("group_id"),
+                    )
+                    if sent:
+                        flash(f"User {updated.get('username')} approved and notified.", "success")
+                    else:
+                        flash(f"User {updated.get('username')} approved (email not sent).", "warning")
+                except Exception as e:
+                    print(f"notify_user_approved error: {e}", file=sys.stderr)
+                    flash("User approved, but notification failed.", "warning")
+                
+                return redirect(url_for("admin_approve_users"))
+        
+        # GET: list pending users
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, username, email, created_at FROM users WHERE activate = FALSE ORDER BY created_at ASC;"
+            )
+            pending = cur.fetchall()
+        
+        return render_template("admin_approve_users.html", pending_users=pending)
+    
+    except Exception as e:
+        print(f"admin_approve_users error: {e}", file=sys.stderr)
+        flash("Admin action failed. Please try again.", "error")
+        return redirect(url_for("home"))
+    finally:
+        if conn:
+            conn.close()
+
+# -------------------------------------------------
+# Expenses
+# -------------------------------------------------
+@app.route("/expenses")
+@auth_required
+def expenses():
+    conn = None
+    rows = []
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            query, params = build_query_with_filters(
+                """SELECT e.id, e.description, e.amount, e.currency, e.category, 
+                          e.date_incurred AS expense_date, e.created_by, e.activate
+                   FROM expenses e
+                   WHERE e.activate=TRUE""",
+                g.user_role, g.group_id,
+                "ORDER BY e.date_incurred DESC"
+            )
+            
+            cur.execute(query, params)
+            for r in cur.fetchall():
+                rows.append({
+                    "id": r["id"],
+                    "description": dec(r["description"]) if r["description"] else "",
+                    "amount": float(r["amount"]) if r["amount"] is not None else 0.0,
+                    "currency": r["currency"],
+                    "category": r["category"],
+                    "expense_date": r["expense_date"].strftime("%Y-%m-%d") if r["expense_date"] else "",
+                })
+    except Exception as e:
+        print(f"expenses load error: {e}", file=sys.stderr)
+        flash("Error loading expenses. Please try again.", "error")
+    finally:
+        if conn:
+            conn.close()
+    
+    return render_template("expenses.html", expenses=rows)
+
+@app.route("/add_expense", methods=["GET", "POST"])
+@auth_required
+def add_expense():
+    lists = get_common_lists()
+    
+    if request.method == "POST":
+        try:
+            description = (request.form.get("description") or "").strip()
+            amount = validate_amount(request.form.get("amount"))
+            currency = validate_currency(request.form.get("currency"))
+            category = validate_category(request.form.get("category"))
+            expense_date = request.form.get("expense_date")
+            notes = (request.form.get("notes") or "").strip() or None
+            
+            if not description:
+                flash("Description is required.", "error")
+                return render_template("add_expense.html", 
+                                     categories=lists["expense_categories"],
+                                     currencies=lists["currencies"])
+            
+            if not expense_date:
+                flash("Expense date is required.", "error")
+                return render_template("add_expense.html",
+                                     categories=lists["expense_categories"],
+                                     currencies=lists["currencies"])
+            
+            conn = None
+            try:
+                conn = get_db_connection()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO expenses (
+                            created_by, group_id, description, amount, currency, 
+                            category, date_incurred, notes, activate
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                        RETURNING id;
+                    """, (
+                        g.user_id,
+                        g.group_id,
+                        enc(description),
+                        amount,
+                        currency,
+                        category,
+                        expense_date,
+                        enc(notes) if notes else None
+                    ))
+                    new_id = cur.fetchone()[0]
+                    conn.commit()
+                
+                audit_log("expense_created", "expense", new_id)
+                flash("Expense added successfully.", "success")
+                return redirect(url_for("expenses"))
+            
+            except Exception as e:
+                print(f"add_expense DB error: {e}", file=sys.stderr)
+                flash("Failed to add expense. Please try again.", "error")
+            finally:
+                if conn:
+                    conn.close()
+        
+        except ValueError as e:
+            flash(str(e), "error")
+    
+    return render_template(
+        "add_expense.html",
+        categories=lists["expense_categories"],
+        currencies=lists["currencies"]
+    )
+
+@app.route("/edit_expense/<int:expense_id>", methods=["GET", "POST"])
+@auth_required
+def edit_expense(expense_id):
+    lists = get_common_lists()
+    conn = None
+    
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Verify ownership/access
+            query, params = build_query_with_filters(
+                """SELECT e.id, e.description, e.amount, e.currency, e.category, 
+                          e.date_incurred AS expense_date, e.created_by
+                   FROM expenses e
+                   WHERE e.id=%s AND e.activate=TRUE""",
+                g.user_role, g.group_id
+            )
+            params = (expense_id,) + params
+            
+            cur.execute(query, params)
+            expense = cur.fetchone()
+            
+            if not expense:
+                flash("Expense not found or unauthorized.", "error")
+                return redirect(url_for("expenses"))
+            
+            # Additional check: only creator or admin can edit
+            if g.user_role != "Admin" and expense["created_by"] != g.user_id:
+                audit_log("unauthorized_expense_edit_attempt", "expense", expense_id, success=False)
+                flash("You can only edit your own expenses.", "error")
+                return redirect(url_for("expenses"))
+            
+            if request.method == "POST":
+                try:
+                    description = (request.form.get("description") or "").strip()
+                    amount = validate_amount(request.form.get("amount"))
+                    currency = validate_currency(request.form.get("currency"))
+                    category = validate_category(request.form.get("category"))
+                    expense_date = request.form.get("expense_date")
+                    
+                    if not description or not expense_date:
+                        flash("Description and date are required.", "error")
+                        return render_template("edit_expense.html", expense=expense,
+                                             categories=lists["expense_categories"],
+                                             currencies=lists["currencies"])
+                    
+                    update_query, update_params = build_query_with_filters(
+                        """UPDATE expenses
+                           SET description=%s, amount=%s, currency=%s, category=%s, date_incurred=%s
+                           WHERE id=%s AND activate=TRUE""",
+                        g.user_role, g.group_id
+                    )
+                    update_params = (enc(description), amount, currency, category, expense_date, expense_id) + update_params
+                    
+                    cur.execute(update_query, update_params)
+                    conn.commit()
+                    
+                    if cur.rowcount == 0:
+                        flash("Update failed. Please try again.", "error")
+                    else:
+                        audit_log("expense_updated", "expense", expense_id)
+                        flash("Expense updated successfully.", "success")
+                        return redirect(url_for("expenses"))
+                
+                except ValueError as e:
+                    flash(str(e), "error")
+            
+            # Decrypt for display
+            expense["description"] = dec(expense["description"])
+            expense["amount"] = float(expense["amount"]) if expense["amount"] is not None else 0.0
+            expense["expense_date"] = expense["expense_date"].strftime("%Y-%m-%d") if expense["expense_date"] else ""
+            
+            return render_template("edit_expense.html", expense=expense,
+                                 categories=lists["expense_categories"],
+                                 currencies=lists["currencies"])
+    
+    except Exception as e:
+        print(f"edit_expense error: {e}", file=sys.stderr)
+        flash("Error loading expense. Please try again.", "error")
+        return redirect(url_for("expenses"))
+    finally:
+        if conn:
+            conn.close()
+
+@app.route("/delete_expense/<int:expense_id>", methods=["POST"])
+@auth_required
+def delete_expense(expense_id):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # First verify ownership
+            query, params = build_query_with_filters(
+                "SELECT created_by FROM expenses WHERE id=%s AND activate=TRUE",
+                g.user_role, g.group_id
+            )
+            params = (expense_id,) + params
+            
+            cur.execute(query, params)
+            expense = cur.fetchone()
+            
+            if not expense:
+                flash("Expense not found or unauthorized.", "error")
+                return redirect(url_for("expenses"))
+            
+            # Only creator or admin can delete
+            if g.user_role != "Admin" and expense["created_by"] != g.user_id:
+                audit_log("unauthorized_expense_delete_attempt", "expense", expense_id, success=False)
+                flash("You can only delete your own expenses.", "error")
+                return redirect(url_for("expenses"))
+            
+            # Perform deletion
+            delete_query, delete_params = build_query_with_filters(
+                "UPDATE expenses SET activate=FALSE WHERE id=%s",
+                g.user_role, g.group_id
+            )
+            delete_params = (expense_id,) + delete_params
+            
+            cur.execute(delete_query, delete_params)
+            conn.commit()
+            
+            audit_log("expense_deleted", "expense", expense_id)
+            flash("Expense deleted successfully.", "success")
+    
+    except Exception as e:
+        print(f"delete_expense error: {e}", file=sys.stderr)
+        flash("Failed to delete expense. Please try again.", "error")
+    finally:
+        if conn:
+            conn.close()
+    
+    return redirect(url_for("expenses"))
+
+# -------------------------------------------------
+# Assets
+# -------------------------------------------------
+SENSITIVE_ASSET_FIELDS = ["account_no", "beneficiary_name", "contact_phone", "document_location", "description"]
+
+@app.route("/assets")
+@auth_required
+def assets():
+    conn = None
+    rows = []
+    
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            query, params = build_query_with_filters(
+                """SELECT a.id, a.user_id, a.type, a.name, a.country, a.currency, a.value, a.account_no,
+                          a.last_updated, a.notes, a.activate, a.owner, a.owner_id, a.financial_institution,
+                          a.beneficiary_name, a.policy_or_plan_type, a.contact_phone, a.document_location,
+                          a.investment_strategy, a.current_value, a.description, a.added_date, a.group_id
+                   FROM assets a
+                   WHERE a.activate=TRUE""",
+                g.user_role, g.group_id,
+                "ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC"
+            )
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            # Decrypt sensitive fields
+            for r in rows:
+                r["account_no"] = dec(r["account_no"])
+                r["beneficiary_name"] = dec(r["beneficiary_name"])
+                r["contact_phone"] = dec(r["contact_phone"])
+                r["document_location"] = dec(r["document_location"])
+                r["description"] = dec(r["description"])
+                r["financial_institution"] = dec(r.get("financial_institution"))
+                
+                if r.get("last_updated"):
+                    r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
+                if r.get("added_date"):
+                    r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
+    
+    except Exception as e:
+        print(f"assets load error: {e}", file=sys.stderr)
+        flash("Error loading assets. Please try again.", "error")
+    finally:
+        if conn:
+            conn.close()
+    
+    # Calculate USD equivalents
+    inr_to_usd = 1.0 / 83.0
+    try:
+        if EXCHANGE_RATE_API_KEY:
+            usd_to_inr = get_exchange_rate("USD", "INR")
+            inr_to_usd = 1.0 / float(usd_to_inr) if usd_to_inr else 1.0 / 83.0
+        else:
+            res = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
+            data = res.json()
+            usd_to_inr = data["rates"]["INR"]
+            inr_to_usd = 1.0 / float(usd_to_inr)
+    except Exception as e:
+        print(f"FX fetch failed, using fallback: {e}", file=sys.stderr)
+        inr_to_usd = 1.0 / 83.0
+    
+    for r in rows:
+        curr = (r.get("currency") or "").upper()
+        try:
+            val = float(r.get("current_value") or r.get("value") or 0.0)
+        except Exception:
+            val = 0.0
+        
+        if curr == "USD":
+            r["usd_value"] = round(val, 2)
+        elif curr == "INR":
+            r["usd_value"] = round(val * inr_to_usd, 2)
+        else:
+            r["usd_value"] = None
+    
+    # Sorting
+    sortable_fields = {
+        "name", "type", "country", "currency", "last_updated",
+        "usd_value", "current_value", "added_date"
+    }
+    sort_by = request.args.get("sort", "usd_value")
+    order = request.args.get("order", "desc").lower()
+    
+    if sort_by not in sortable_fields:
+        sort_by = "usd_value"
+    if order not in ("asc", "desc"):
+        order = "desc"
+    
+    reverse = (order == "desc")
+    
+    def sort_key(r):
+        v = r.get(sort_by)
+        if sort_by in ("usd_value", "current_value"):
+            try:
+                return float(v or 0.0)
+            except Exception:
+                return 0.0
+        if sort_by in ("last_updated", "added_date"):
+            return v or ""
+        return (str(v or "")).lower()
+    
+    rows = sorted(rows, key=sort_key, reverse=reverse)
+    
+    return render_template("assets.html", assets=rows, sort_by=sort_by, order=order)
+
+@app.route("/add_asset", methods=["GET", "POST"])
+@auth_required
+def add_asset():
+    lists = get_common_lists()
+    
+    if request.method == "POST":
+        try:
+            owner_id = request.form.get("owner_id")
+            atype = validate_asset_type(request.form.get("type"))
+            name = (request.form.get("name") or "").strip()
+            account_no = (request.form.get("account_no") or "").strip()
+            value = validate_amount(request.form.get("value"))
+            currency = validate_currency(request.form.get("currency"))
+            country = request.form.get("country")
+            financial_institution = (request.form.get("financial_institution") or "").strip()
+            policy_or_plan_type = (request.form.get("policy_or_plan_type") or "").strip()
+            beneficiary_name = (request.form.get("beneficiary_name") or "").strip()
+            contact_phone = (request.form.get("contact_phone") or "").strip()
+            document_location = (request.form.get("document_location") or "").strip()
+            investment_strategy = (request.form.get("investment_strategy") or "").strip()
+            notes = (request.form.get("notes") or "").strip()
+            
+            if not name:
+                flash("Asset name is required.", "error")
+                return render_template("add_asset.html",
+                                     owners=lists["owners"],
+                                     asset_types=lists["asset_types"],
+                                     currencies=lists["currencies"],
+                                     countries=lists["countries"])
+            
+            now = datetime.now()
+            conn = None
+            try:
+                conn = get_db_connection()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO assets
+                            (user_id, type, name, country, currency, value, account_no, last_updated, notes, activate,
+                             owner, owner_id, financial_institution, beneficiary_name, policy_or_plan_type, contact_phone,
+                             document_location, investment_strategy, current_value, description, added_date, group_id)
+                        VALUES
+                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
+                             %s, %s, %s, %s, %s, %s,
+                             %s, %s, %s, %s, %s, %s)
+                        RETURNING id;
+                    """, (
+                        g.user_id, atype, name, country, currency, value, enc(account_no), now, notes,
+                        None, owner_id, enc(financial_institution), enc(beneficiary_name), policy_or_plan_type, enc(contact_phone),
+                        enc(document_location), investment_strategy, value, enc(""), now.date(), g.group_id
+                    ))
+                    new_id = cur.fetchone()[0]
+                    conn.commit()
+                
+                audit_log("asset_created", "asset", new_id)
+                flash("Asset added successfully.", "success")
+                return redirect(url_for("assets"))
+            
+            except Exception as e:
+                print(f"add_asset DB error: {e}", file=sys.stderr)
+                flash("Failed to add asset. Please try again.", "error")
+            finally:
+                if conn:
+                    conn.close()
+        
+        except ValueError as e:
+            flash(str(e), "error")
+    
+    return render_template(
+        "add_asset.html",
+        owners=lists["owners"],
+        asset_types=lists["asset_types"],
+        currencies=lists["currencies"],
+        countries=lists["countries"],
+    )
+
+@app.route("/edit_asset/<int:asset_id>", methods=["GET", "POST"])
+@auth_required
+def edit_asset(asset_id):
+    lists = get_common_lists()
+    conn = None
+    
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Verify ownership/access
+            query, params = build_query_with_filters(
+                "SELECT a.* FROM assets a WHERE a.id=%s AND a.activate=TRUE",
+                g.user_role, g.group_id
+            )
+            params = (asset_id,) + params
+            
+            cur.execute(query, params)
+            asset = cur.fetchone()
+            
+            if not asset:
+                flash("Asset not found or unauthorized.", "error")
+                return redirect(url_for("assets"))
+            
+            # Additional check: only creator or admin can edit
+            if g.user_role != "Admin" and asset["user_id"] != g.user_id:
+                audit_log("unauthorized_asset_edit_attempt", "asset", asset_id, success=False)
+                flash("You can only edit your own assets.", "error")
+                return redirect(url_for("assets"))
+            
+            if request.method == "POST":
+                try:
+                    owner_id = request.form.get("owner_id")
+                    atype = validate_asset_type(request.form.get("type"))
+                    name = (request.form.get("name") or "").strip()
+                    account_no = (request.form.get("account_no") or "").strip()
+                    value = validate_amount(request.form.get("value"))
+                    currency = validate_currency(request.form.get("currency"))
+                    country = request.form.get("country")
+                    financial_institution = (request.form.get("financial_institution") or "").strip()
+                    policy_or_plan_type = (request.form.get("policy_or_plan_type") or "").strip()
+                    beneficiary_name = (request.form.get("beneficiary_name") or "").strip()
+                    contact_phone = (request.form.get("contact_phone") or "").strip()
+                    document_location = (request.form.get("document_location") or "").strip()
+                    investment_strategy = (request.form.get("investment_strategy") or "").strip()
+                    notes = (request.form.get("notes") or "").strip()
+                    
+                    if not name:
+                        flash("Asset name is required.", "error")
+                        return render_template("edit_asset.html", asset=asset,
+                                             owners=lists["owners"],
+                                             asset_types=lists["asset_types"],
+                                             currencies=lists["currencies"],
+                                             countries=lists["countries"])
+                    
+                    update_query, update_params = build_query_with_filters(
+                        """UPDATE assets
+                           SET owner_id=%s, type=%s, name=%s, account_no=%s, value=%s, currency=%s, country=%s,
+                               financial_institution=%s, policy_or_plan_type=%s, beneficiary_name=%s, contact_phone=%s,
+                               document_location=%s, investment_strategy=%s, notes=%s, last_updated=%s, current_value=%s
+                           WHERE id=%s AND activate=TRUE""",
+                        g.user_role, g.group_id
+                    )
+                    update_params = (
+                        owner_id, atype, name, enc(account_no), value, currency, country,
+                        enc(financial_institution), policy_or_plan_type, enc(beneficiary_name), enc(contact_phone),
+                        enc(document_location), investment_strategy, notes, datetime.now(), value, asset_id
+                    ) + update_params
+                    
+                    cur.execute(update_query, update_params)
+                    conn.commit()
+                    
+                    if cur.rowcount == 0:
+                        flash("Update failed. Please try again.", "error")
+                    else:
+                        audit_log("asset_updated", "asset", asset_id)
+                        flash("Asset updated successfully.", "success")
+                        return redirect(url_for("assets"))
+                
+                except ValueError as e:
+                    flash(str(e), "error")
+            
+            # Decrypt for display
+            for f in SENSITIVE_ASSET_FIELDS:
+                if f in asset:
+                    asset[f] = dec(asset.get(f))
+            asset["financial_institution"] = dec(asset.get("financial_institution"))
+            
+            return render_template(
+                "edit_asset.html",
+                asset=asset,
+                owners=lists["owners"],
+                asset_types=lists["asset_types"],
+                currencies=lists["currencies"],
+                countries=lists["countries"],
+            )
+    
+    except Exception as e:
+        print(f"edit_asset error: {e}", file=sys.stderr)
+        flash("Error loading asset. Please try again.", "error")
+        return redirect(url_for("assets"))
+    finally:
+        if conn:
+            conn.close()
+
+@app.route("/delete_asset/<int:asset_id>", methods=["POST"])
+@auth_required
+def delete_asset(asset_id):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # First verify ownership
+            query, params = build_query_with_filters(
+                "SELECT user_id FROM assets WHERE id=%s AND activate=TRUE",
+                g.user_role, g.group_id
+            )
+            params = (asset_id,) + params
+            
+            cur.execute(query, params)
+            asset = cur.fetchone()
+            
+            if not asset:
+                flash("Asset not found or unauthorized.", "error")
+                return redirect(url_for("assets"))
+            
+            # Only creator or admin can delete
+            if g.user_role != "Admin" and asset["user_id"] != g.user_id:
+                audit_log("unauthorized_asset_delete_attempt", "asset", asset_id, success=False)
+                flash("You can only delete your own assets.", "error")
+                return redirect(url_for("assets"))
+            
+            # Perform deletion
+            delete_query, delete_params = build_query_with_filters(
+                "UPDATE assets SET activate=FALSE WHERE id=%s",
+                g.user_role, g.group_id
+            )
+            delete_params = (asset_id,) + delete_params
+            
+            cur.execute(delete_query, delete_params)
+            conn.commit()
+            
+            audit_log("asset_deleted", "asset", asset_id)
+            flash("Asset deleted successfully.", "success")
+    
+    except Exception as e:
+        print(f"delete_asset error: {e}", file=sys.stderr)
+        flash("Failed to delete asset. Please try again.", "error")
+    finally:
+        if conn:
+            conn.close()
+    
+    return redirect(url_for("assets"))
+
+# -------------------------------------------------
+# Init DB (DANGEROUS - Development only)
+# -------------------------------------------------
+@app.route("/init_db", methods=["POST"])
+@limiter.limit("1 per day")
+def init_db():

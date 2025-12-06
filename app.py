@@ -923,33 +923,40 @@ ENCRYPTED_FIELDS = [
     "name"
 ]
 
+def safe_dec(val):
+    """Safely decrypt a value; return original if fails."""
+    try:
+        return dec(val) if val is not None else None
+    except Exception as e:
+        print(f"Decrypt error for value {val}: {e}", file=sys.stderr)
+        return val
+
 # -------- List assets --------
 @app.route("/assets")
 @auth_required
 def assets():
     conn = None
     rows = []
+    sort_by = request.args.get("sort", "usd_value")
+    order = request.args.get("order", "desc").lower()
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
-        
+
         cur.execute(f"""
-            SELECT a.id, a.user_id, a.type, a.name, a.country, a.currency, a.value, a.account_no,
-                   a.last_updated, a.notes, a.activate, a.owner, a.owner_id, a.financial_institution,
-                   a.beneficiary_name, a.policy_or_plan_type, a.contact_phone, a.document_location,
-                   a.investment_strategy, a.current_value, a.description, a.added_date, a.group_id
+            SELECT a.*
             FROM assets a
             WHERE a.activate=TRUE {gf}
             ORDER BY a.last_updated DESC NULLS LAST, a.added_date DESC NULLS LAST, a.id DESC;
         """, gp)
         rows = cur.fetchall()
 
-        # Decrypt fields and format dates
+        # Decrypt sensitive fields and format dates
         for r in rows:
             for f in ENCRYPTED_FIELDS:
-                if r.get(f) is not None:
-                    r[f] = dec(r[f])
+                if f in r:
+                    r[f] = safe_dec(r[f])
             if r.get("last_updated"):
                 r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
             if r.get("added_date"):
@@ -978,8 +985,6 @@ def assets():
 
         # -------- Sorting --------
         sortable_fields = {"name", "type", "country", "currency", "last_updated", "usd_value", "current_value", "added_date"}
-        sort_by = request.args.get("sort", "usd_value")
-        order = request.args.get("order", "desc").lower()
         if sort_by not in sortable_fields:
             sort_by = "usd_value"
         if order not in ("asc", "desc"):
@@ -1032,11 +1037,11 @@ def add_asset():
                     (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
-                g.user_id, form.get("type"), form.get("name"), form.get("country"), form.get("currency"), form.get("value"),
-                enc(form.get("account_no")), last_updated, enc(form.get("notes")), None, form.get("owner_id"),
-                enc(form.get("financial_institution")), enc(form.get("beneficiary_name")), form.get("policy_or_plan_type"),
-                enc(form.get("contact_phone")), enc(form.get("document_location")), form.get("investment_strategy"),
-                form.get("value"), enc(""), added_date, g.group_id
+                g.user_id, form.get("type"), form.get("name"), form.get("country"), form.get("currency"),
+                form.get("value"), enc(form.get("account_no")), last_updated, enc(form.get("notes")), None,
+                form.get("owner_id"), enc(form.get("financial_institution")), enc(form.get("beneficiary_name")),
+                form.get("policy_or_plan_type"), enc(form.get("contact_phone")), enc(form.get("document_location")),
+                form.get("investment_strategy"), form.get("value"), enc(""), added_date, g.group_id
             ))
             conn.commit()
             flash("Asset saved.", "success")
@@ -1068,7 +1073,7 @@ def edit_asset(asset_id):
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         gf, gp = get_group_filter_clause(g.user_role, g.group_id, table_alias="a")
-        cur.execute(f"SELECT a.* FROM assets a WHERE a.id=%s AND a.activate=TRUE {gf};", (asset_id,) + gp)
+        cur.execute("SELECT a.* FROM assets a WHERE a.id=%s AND a.activate=TRUE {gf};".format(gf=gf), (asset_id,) + gp)
         asset = cur.fetchone()
         if not asset:
             flash("Asset not found or unauthorized.", "error")
@@ -1101,7 +1106,7 @@ def edit_asset(asset_id):
         # decrypt for form display
         for f in ENCRYPTED_FIELDS:
             if asset.get(f) is not None:
-                asset[f] = dec(asset[f])
+                asset[f] = safe_dec(asset[f])
         if asset.get("last_updated"):
             asset["last_updated"] = asset["last_updated"].strftime("%Y-%m-%d")
         if asset.get("added_date"):
@@ -1126,7 +1131,7 @@ def edit_asset(asset_id):
             except: pass
             conn.close()
 
-
+# -------- Delete asset --------
 @app.route("/delete_asset/<int:asset_id>", methods=["POST"])
 @auth_required
 def delete_asset(asset_id):
@@ -1206,6 +1211,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

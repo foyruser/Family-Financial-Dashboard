@@ -61,9 +61,10 @@ app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER', 'no-re
 # Encryption setup
 FERNET_KEY = os.environ.get("FERNET_KEY")
 if not FERNET_KEY:
-    # Fallback/development key - NEVER use this in production. Using a fixed, safe default.
-    FERNET_KEY = "NzM2ZWFiZDQ4NWJiMjA1OWE5YjFhMTMzYTg3MzQ5NmY=" 
-    print("Warning: FERNET_KEY not set, using temporary, fixed key.")
+    # CRITICAL: Fail if the FERNET_KEY is not provided via environment variable.
+    # This prevents the hardcoded key exposure that GitGuardian flagged.
+    print("FATAL ERROR: FERNET_KEY environment variable is NOT set. Cannot run application securely.", file=sys.stderr)
+    sys.exit(1) # Stop application if essential security key is missing.
     
 f = Fernet(FERNET_KEY.encode())
 

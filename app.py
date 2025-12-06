@@ -937,6 +937,7 @@ def assets():
         for r in rows:
             r["account_no"] = dec(r["account_no"])
             r["beneficiary_name"] = dec(r["beneficiary_name"])
+            r["financial_institution"] = dec(r["financial_institution"])
             r["contact_phone"] = dec(r["contact_phone"])
             r["document_location"] = dec(r["document_location"])
             r["description"] = dec(r["description"])
@@ -1229,6 +1230,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

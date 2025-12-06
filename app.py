@@ -934,16 +934,26 @@ def assets():
         rows = cur.fetchall()
 
         # Decrypt and format dates
-        for r in rows:
-            r["account_no"] = dec(r["account_no"])
-            r["beneficiary_name"] = dec(r["beneficiary_name"])
-            r["contact_phone"] = dec(r["contact_phone"])
-            r["document_location"] = dec(r["document_location"])
-            r["description"] = dec(r["description"])
-            if r.get("last_updated"):
-                r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
-            if r.get("added_date"):
-                r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
+       # Decrypt and format dates
+ENCRYPTED_FIELDS = [
+    "account_no",
+    "beneficiary_name",
+    "contact_phone",
+    "document_location",
+    "description",
+    "financial_institution",
+    "notes",
+    "name"
+]
+
+for r in rows:
+    for f in ENCRYPTED_FIELDS:
+        r[f] = dec(r.get(f))
+    if r.get("last_updated"):
+        r["last_updated"] = r["last_updated"].strftime("%Y-%m-%d")
+    if r.get("added_date"):
+        r["added_date"] = r["added_date"].strftime("%Y-%m-%d")
+
     except Exception as e:
         print(f"assets load error: {e}", file=sys.stderr)
         flash(f"Error loading assets: {e}", "error")
@@ -1229,6 +1239,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 

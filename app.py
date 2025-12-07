@@ -16,7 +16,6 @@ from psycopg2.extras import RealDictCursor
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
-
 from cryptography.fernet import Fernet
 
 # -------------------------------------------------
@@ -60,28 +59,39 @@ MAIL_SENDER = os.environ.get("MAIL_SENDER", MAIL_USERNAME or "no-reply@example.c
 # -------------------------------------------------
 # Encryption helper
 # -------------------------------------------------
-class Encryptor:
-    def __init__(self, key: str | None):
-        if not key:
-            print("WARNING: FERNET_KEY not set; generating ephemeral key (NOT for production).", file=sys.stderr)
-            key = Fernet.generate_key().decode()
-        self.f = Fernet(key.encode())
+FERNET_KEY = os.environ.get("FERNET_KEY")
+if not FERNET_KEY:
+    if os.environ.get("FLASK_ENV") == "production":
+        raise RuntimeError("FERNET_KEY environment variable must be set in production!")
+    else:
+        print("WARNING: FERNET_KEY not set; generating ephemeral key for development ONLY.", file=sys.stderr)
+        FERNET_KEY = Fernet.generate_key().decode()
 
-    def encrypt(self, data):
+
+class Encryptor:
+    def __init__(self, key: str):
+        # Ensure key is bytes
+        if isinstance(key, str):
+            key = key.encode()
+        self.f = Fernet(key)
+
+    def encrypt(self, data: str | int | float) -> str | None:
         if data is None or data == "":
             return None
         return self.f.encrypt(str(data).encode()).decode()
 
-    def decrypt(self, data):
+    def decrypt(self, data: str) -> str:
         if data is None or data == "":
             return ""
         try:
             return self.f.decrypt(data.encode()).decode()
         except Exception:
-            # caller decides what to do; we don't spam logs here
+            # Do not spam logs for unreadable legacy/invalid data
             return "[unreadable]"
 
+
 encryptor = Encryptor(FERNET_KEY)
+
 
 def looks_encrypted(value: str) -> bool:
     """Heuristic to avoid decrypting legacy plaintext."""
@@ -93,16 +103,22 @@ def looks_encrypted(value: str) -> bool:
         return False
     return True
 
-def enc(v):
-    return encryptor.encrypt(v) if v not in (None, "") else None
 
-def dec(v):
+def enc(v: str | int | float | None) -> str | None:
+    """Encrypt a value if not None or empty."""
+    if v in (None, ""):
+        return None
+    return encryptor.encrypt(v)
+
+
+def dec(v: str | None) -> str:
+    """Decrypt a value if it looks encrypted, else return as-is."""
     if v in (None, ""):
         return ""
     s = str(v)
     if looks_encrypted(s):
-        out = encryptor.decrypt(s)
-        return out if out != "[unreadable]" else "[unreadable]"
+        decrypted = encryptor.decrypt(s)
+        return decrypted if decrypted != "[unreadable]" else "[unreadable]"
     # legacy plaintext kept as-is
     return s
 
@@ -1209,6 +1225,7 @@ def notify_admin_user_approved(username: str, approver: str | None, group_id: st
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
